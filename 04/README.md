@@ -112,7 +112,7 @@
 | 전처리 방식 | 정확도 |
 |--|--|
 | SMOTE + 표준화 | 이상치 제거 + 표준화보다 낮음 |
-| 이상치 제거(클래스별) + SMOTE + 표준화 | example.py 실행 참조 |
+| 이상치 제거(클래스별) + SMOTE + 표준화 | [example.py](example.py) 실행 참조 |
 
 > SMOTE 적용 후 accuracy가 낮아지는 현상은 정상이다. Accuracy는 불균형 데이터에 적합하지 않은 지표로, 실제로는 Silver 클래스의 recall이 개선되었을 수 있다. 정밀한 평가를 위해서는 F1-score 또는 Confusion Matrix를 확인해야 한다.
 
