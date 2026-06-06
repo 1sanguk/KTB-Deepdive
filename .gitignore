@@ -1,4 +1,6 @@
 *.csv
 *.json
 *.md
+*.pyc
+*.DS_Store
 !README*.md
