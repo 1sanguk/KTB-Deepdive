@@ -1,0 +1,108 @@
+=== KTB 5주차 위클리챌린지 - 한국어 Mini-GPT 챗봇 개발 세션 기록 (2026-06-14) ===
+질문 목록 및 답변 요약
+
+1. "look through 05/chatbot folder and read plan.md."
+   -> plan.md를 읽고 프로젝트 전체 계획(Phase 0~6: 자모분해 BPE 직접구현 -> mini-GPT
+      아키텍처 -> Stage1 이어쓰기 학습 -> Stage2 Q&A 파인튜닝 -> FastAPI 서빙) 설명.
+
+2. "so what should i do now in main..py?"
+   -> Phase 0(스모크 테스트)부터 시작 권장 - 작은 데이터/char-level tokenizer로
+      학습 파이프라인이 끝까지 도는지 먼저 확인하라고 안내.
+
+3. "nope i will write the code. stay 'til i say so"
+   -> 코드는 사용자가 직접 작성, Claude는 검토(check)/실행/검증(verify) 역할로
+      전환하기로 합의.
+
+4. "so i need to make train function to train my model at first right?"
+   -> 동의 - 학습 루프(train function)부터 만드는 것이 맞는 순서라고 확인.
+
+5. "i seperated into tokenizer and train.py. what should i do now?"
+   -> tokenizer.py / train.py 분리 구조 검토, 다음으로 데이터 로딩 -> 인코딩 ->
+      모델 정의 순서로 진행하도록 안내.
+
+6. "is it fine now?"
+   -> 작성된 코드 검토 - 구조상 문제없음 확인.
+
+7. "그럼 이제 phase2하면되겟지?" (now, is it time to go phase 2?)
+   -> Phase2(mini-GPT 모델 아키텍처 구현) 진행 시점이 적절하다고 확인.
+
+8. "okay lets go with after one"
+   -> 제시된 옵션 중 선택에 동의, 해당 방향으로 진행.
+
+9. "can u give me some recommendation about this procedure?"
+   -> 진행 절차(다음 단계 순서, 검증 방법 등)에 대한 추천 제공.
+
+10. "check bpe.py please"
+    -> bpe.py 코드 리뷰 - decompose/compose(NFD/NFC), train_bpe의 word-frequency
+       기반 incremental BPE 로직 검증, 문제없음 확인.
+
+11. "now what should i do then?"
+    -> 다음 단계(모델 학습 실행)로 안내.
+
+12. (train.py chat 실행 결과 붙여넣고) "what do u think?"
+    -> Phase0 스모크 테스트 성공 평가 - 200 step, vocab_size=1244(char-level),
+       loss 6.2 -> 2.66, 체크포인트 저장/샘플생성까지 파이프라인 전체 정상 동작 확인.
+
+13. "ummm. my plan would be wrong. I should build a model that predicts next
+    word when input comes, recursively until dot/eos comes out..."
+    -> 생성 방식에 대한 통찰에 동의 - autoregressive 생성 + 종료조건(stop_tokens)까지
+       반복 생성하는 방향으로 model.generate()에 stop_tokens 파라미터를 추가하는
+       구조를 검토/지지.
+
+14. "then what should i do now?"
+    -> Stage1(이어쓰기 학습) -> Stage2(Q&A 파인튜닝) 순서로 진행하도록 안내.
+
+15. "ok i will try"
+    -> 사용자가 직접 구현 시도, Claude는 대기.
+
+16. "check now"
+    -> stop_tokens 구현 등 변경사항 코드 리뷰 - 정확성 확인 (repetition penalty,
+       top_k tie 처리 등 정상 동작).
+
+17. (train.py chat 실행 결과 - 88.5M corpus, vocab_size 9188) "what do u think?"
+    -> 문제 진단: 토큰 수가 글자 수보다 많고 vocab_size=9188인데 merges={} ->
+       BPE merge가 0개. 원인은 base alphabet(코퍼스 고유 문자 9188개)이 이미
+       목표 vocab_size(8000)보다 커서 merge 루프가 한 번도 실행되지 못한 것 -
+       사실상 자모 단위 토크나이저로 전락했음을 진단.
+
+18. "check now" (BASE_ALPHABET_SIZE=300 + UNK 토큰 수정 후)
+    -> 수정 검증 - ChatbotData(vocab_size=2000) 테스트로 merge 1888개 학습,
+       압축률 0.5x -> 1.42x 개선, roundtrip 100% 일치 확인. bpe_vocab.json
+       재학습 갱신 확인.
+
+19. "validate my code now"
+    -> 전체 프로젝트(재구조화된 source/app, source/model, Stage1/Stage2 학습결과,
+       FastAPI 서빙)가 Readme.md 기술 내용과 일치하는지 종합 검증:
+       - bpe.py / tokenizer.py / model.py / train_utils.py / train.py /
+         finetune_qa.py / chat.py / app.py 코드 리뷰
+       - train_run.log <-> Readme 수치(Stage1 val loss 3.514) 대조 - 일치 확인
+       - FastAPI 서버 실행 후 /generate, /chat, /, /docs smoke test 전부 정상
+
+20. "is there any awkwardness in code or project"
+    -> 5가지 어색한 점 지적:
+       (1) build_vocab 이름 충돌 (tokenizer.py의 미사용 동명 함수, 죽은 코드)
+       (2) train.py 최종 샘플 생성에 stop_tokens/temperature/top_k/
+           repetition_penalty 옵션 누락 -> 의미없는 출력의 원인
+       (3) 생성(추론) 로직이 chat.py와 app.py에 중복
+       (4) START_ID=0이 설계된 BOS 토큰이 아니라 "정렬상 우연히 1번"인 문자
+       (5) bpe_vocab.json <-> 체크포인트(SOP_GPT.pt/SOP_GPT_qa.pt) 간 vocab_size
+           암묵적 결합 (재현성 트랩)
+
+21. "now check again plz"
+    -> 사용자가 직접 수정한 내용 재검증:
+       - tokenizer.py: 미사용 char-level build_vocab/encode/decode 삭제 (1번 해결)
+       - train.py + finetune_qa.py -> main.py 하나로 통합
+         (MODES: train/train_qa/chat/chat_qa), chat 계열은 88M 코퍼스 로딩
+         skip (3번 일부 해결)
+       - train_stage1 샘플 생성에 chat()과 동일한 옵션 적용 (2번 해결)
+       - app.py: 단순 테스트 폼 -> 채팅버블 UI 전면 개편, 한글 IME 조합 처리 포함
+       - main.py chat_qa 실행 및 FastAPI 재기동으로 정상 동작 재확인
+       - 4, 5번은 설계상 특징으로 보류(합리적 판단)
+
+22. "이거 세션기록 뽑아줄수있어"
+    -> 어떤 형태의 세션기록을 원하는지(요약 / 원문 transcript / 둘 다) 확인 질문.
+
+23. "내가 질문한건 리스트 쭉뽑아주고 질문에 대한 대답을 질문마다 요약해줘.
+    그리고 그걸 txt파일이나 세션기록을 뽑아줘"
+    -> (현재 작업) 위 질문-답변 목록을 본 txt 파일로 저장.
+</content>
