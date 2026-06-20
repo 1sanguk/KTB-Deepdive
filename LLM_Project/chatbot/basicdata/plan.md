@@ -53,6 +53,28 @@
 - 실행: `app/` 디렉터리에서 `uvicorn app:app --reload`
 - 테스트 결과: "안녕하" → "세요!", "/chat 취업 준비 잘하고 있어?" → "계획적이고 필요한게 더 많겠죠." 등 정상 응답
 
+## Phase 7 — RAG(검색 증강 생성) 도입 ✅
+- **지식 베이스**: KorQuAD v1.0 dev set을 다운로드해 ~90자 단위 청크로 분할
+- **검색기**: scikit-learn `TfidfVectorizer` + 코사인 유사도 기반 `rag.py` 신규 작성
+- **Stage 3 파인튜닝**: `SOP_GPT_qa.pt`에서 이어서 KorQuAD (참고/질문/답변) 트리플로 학습한 `SOP_GPT_rag.pt` 도입 — 모델이 `"참고: ..."` 필드를 읽고 답변에 반영하도록 학습, val loss 5.406 → 3.538
+- `main.py`/`chat.py`에 `train_rag`/`chat_rag` 모드 추가, `app.py` `/chat`을 검색→증강 프롬프트→생성 파이프라인으로 교체 (`retrieved_context` 필드 추가)
+- 검증 결과: 검색은 정확했으나 답변 생성은 모델 규모 한계로 사실 추출형 질문에서 부정확, 잡담형 질문은 무관한 문서가 끼어들어 오히려 부자연스러워짐
+
+## Phase 8 — 생성형 RAG 폐기 → 추출형 RAG(Stage 4)로 구조 변경 ✅
+- 디코딩 파라미터 튜닝(top-p 추가), Stage 1 코퍼스 비중 재조정(kowiki 80M→15M자, 챗봇 데이터 15배 업샘플링) — 부분적 개선에 그침
+- **Stage 3(생성형) 폐기, Stage 4(추출형 QA) 도입**: `SOP_GPT_Span`(transformer 본체 재사용 + 정답 시작/끝 위치 분류 head)으로 참고 문단에서 정답 구간을 직접 추출
+  - `bpe.py`에 `tokenize_with_offsets()` 추가, `rag.py`에 `answer_window`/`build_span_examples`/`best_match` 추가
+  - `SOP_GPT_qa.pt` 본체로 초기화 후 qa_head만 학습, val loss 3.175, 검증셋 정확히 일치 31.5% / 겹침 72.8%
+- **유사도 임계값 폴백 라우팅**: `/chat`에서 검색 유사도 ≥0.25면 Stage4(추출형), 미만이면 Stage2(잡담형)로 자동 전환, 응답에 `used_rag` 필드 노출
+- 안 쓰는 `SOP_GPT_rag.pt` 삭제
+
+## Phase 9 — 검색기 하이브리드화 (오분류 개선) ✅
+- 사전학습 임베딩(`klue/bert-base`)은 anisotropy 문제로 부적합 → STS 파인튜닝 모델 `jhgan/ko-sroberta-multitask`로 교체
+- **하이브리드 점수**: `hybrid_score = α·normalize(sparse) + (1-α)·normalize(dense)` (α=0.5)
+  - 질문별 그때그때 min-max 정규화하던 버그 수정 → `rag.calibrate()`로 relevant/irrelevant 샘플 기준 정규화 범위를 한 번만 고정
+- held-out 검증: TF-IDF 단독 73.3%(임계값 0.26) → 하이브리드+고정보정 82.7%(임계값 0.515)
+- `rag.build_index()`가 `(tfidf_vectorizer, tfidf_matrix, embed_matrix, passages, norm_bounds)` 반환, `RAG_SIM_THRESHOLD` 0.25 → 0.515로 갱신
+
 ## 디렉토리 구조
 ```
 source/
@@ -62,19 +84,23 @@ source/
     ├── bpe.py
     ├── tokenizer.py
     ├── model.py
+    ├── rag.py            # 검색기 (TF-IDF + 임베딩 하이브리드, calibrate)
     ├── train_utils.py
-    ├── main.py           # 진입점: train / chat / train_qa / chat_qa
+    ├── main.py           # 진입점: train / chat / train_qa / chat_qa / train_rag / chat_rag
     ├── chat.py
     ├── bpe_vocab.json
     ├── SOP_GPT.pt
-    └── SOP_GPT_qa.pt
+    ├── SOP_GPT_qa.pt
+    └── SOP_GPT_Span.pt   # Stage4 추출형 QA head
 ```
 - `model/main.py`는 그 디렉터리에서 실행 (상대경로로 `bpe_vocab.json`/체크포인트 참조)
-  - `train`/`chat`은 Stage1, `train_qa`/`chat_qa`는 Stage2 — `chat`/`chat_qa`/`train_qa`는 88M자 Stage1 코퍼스를 불러오지 않아 빠르게 시작됨
+  - `train`/`chat`은 Stage1, `train_qa`/`chat_qa`는 Stage2, `train_rag`/`chat_rag`는 RAG 흐름 — `chat`/`chat_qa`/`train_qa`는 88M자 Stage1 코퍼스를 불러오지 않아 빠르게 시작됨
 - `app/app.py`는 `__file__` 기준으로 `../model`을 `sys.path`에 추가해 어디서 실행해도 동작
+- `/chat`은 검색 유사도(hybrid_score)에 따라 Stage4(추출형, ≥0.515) ↔ Stage2(잡담형, <0.515)로 자동 라우팅
 
 ## 스트레치 골 (여유 있을 때)
 - temperature / top-k / top-p 샘플링
 - KV cache로 생성 속도 개선
 - 파이프라인 검증 후 모델/데이터 규모 확장
 - FastAPI `StreamingResponse`로 토큰 단위 스트리밍 출력
+- sentence-transformers/FAISS 등 전용 라이브러리로 검색기 교체해 정확도/속도 비교
