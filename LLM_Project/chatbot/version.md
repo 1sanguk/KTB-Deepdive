@@ -7,6 +7,7 @@
   - [1. RAG 도입: 검색 결과를 실제로 활용하는 Q&A로 발전](#1-rag-도입-검색-결과를-실제로-활용하는-qa로-발전)
   - [2. 생성형 RAG의 한계를 해결하기 위한 구조 변경](#2-생성형-rag의-한계를-해결하기-위한-구조-변경)
   - [3. 임계값 라우팅 오분류 개선: 검색기 하이브리드화](#3-임계값-라우팅-오분류-개선-검색기-하이브리드화)
+- [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [회고](#회고)
 
 ---
@@ -58,6 +59,19 @@
   - `rag.calibrate()` 추가: KorQuAD 질문(relevant) vs 챗봇 데이터 질문(irrelevant) 80개씩 샘플로 sparse/dense 점수의 정상 범위를 **한 번만 고정** 측정 → 이 고정값으로 정규화해야 질문들 사이에 비교 가능한 절대 점수가 됨
 - **held-out 검증으로 효과 확인**: 보정용 샘플과 평가용 샘플을 분리해서 측정 — TF-IDF 단독 분류 정확도 73.3%(임계값 0.26) → 하이브리드+고정보정 82.7%(임계값 0.515)
 - `app.py`/`main.py`/`chat.py`: `rag.build_index()`가 `(tfidf_vectorizer, tfidf_matrix, embed_matrix, passages, norm_bounds)` 5종을 반환하도록 변경, `RAG_SIM_THRESHOLD`를 0.25 → 0.515로 갱신
+
+## 2026-06-25 — RAG 검색기 LangChain 마이그레이션
+
+> 손으로 짠 하이브리드 검색기(TF-IDF + ko-sroberta)를 LangChain 표준 컴포넌트로 교체하고, 서빙용 검색 코드를 모델/학습 코드와 디렉터리 단위로 분리했습니다.
+
+- **새 디렉터리 `source/langchain_rag/` 신설**: `HybridRetriever` 클래스가 `BM25Retriever`(sparse) + `FAISS`(dense, ko-sroberta 임베딩) + `EnsembleRetriever`로 검색을 결합. `source/model/`(아키텍처/학습/체크포인트)은 건드리지 않고 서빙 시점 검색 로직만 이쪽으로 옮김
+- **라우팅 임계값(0.515) 로직은 그대로 보존**: `EnsembleRetriever`는 RRF(rank fusion) 방식이라 질문 간 비교 가능한 절대 점수를 안 주기 때문에, `/chat`의 폴백 판단(`best_match`)은 BM25 원시 점수 + FAISS 코사인 유사도에 기존 `calibrate()` 고정-보정 정규화 산식을 그대로 포팅해서 유지
+- **라이브러리 함정 발견**: 설치된 `langchain-community` 버전의 FAISS `distance_strategy=COSINE`이 `normalize_L2`를 무시하는 미구현 상태였음 → 정규화된 벡터 + 기본 EUCLIDEAN 전략(`_euclidean_relevance_score_fn`)으로 대체해 코사인 유사도와 단조 대응되는 점수를 얻음
+- **`source/model/rag.py` 정리**: 검색 관련 함수(`build_index`/`calibrate`/`_hybrid_scores`/`retrieve`/`best_match`) 제거, 학습(`train_stage4`)이 쓰는 코퍼스 로딩 함수만 남김. `app.py`/`chat.py`/`main.py`의 5-tuple 호출부를 `HybridRetriever` 객체 하나로 단순화
+- **검증**: 실제 KorQuAD 질문 8개 + 잡담 질문 3개로 라우팅 정확도 8/11 확인 — 기존 TF-IDF+임베딩 하이브리드의 held-out 정확도(82.7%)와 비슷한 수준
+- **`source/test.py` 스모크 테스트 추가**: Colab 등 외부 환경에서 체크포인트나 `bpe_vocab.json` 없이 `HybridRetriever`만 검증할 수 있는 단일 파일 테스트
+- 의존성 추가: `langchain`, `langchain-community`, `langchain-huggingface`, `faiss-cpu`, `rank_bm25` (requirements 파일이 없는 기존 컨벤션대로 직접 설치만 함)
+- **알아낸 한계**: 로컬 체크포인트(`SOP_GPT*.pt`)는 git에 들어있지만 `bpe_vocab.json`은 git에 없어서, 이 작업 환경에서는 FastAPI `/chat` 엔드포인트 전체(생성 모델 포함)를 띄워서 검증하지 못했음 — 검색/라우팅 로직만 독립적으로 검증
 
 ---
 

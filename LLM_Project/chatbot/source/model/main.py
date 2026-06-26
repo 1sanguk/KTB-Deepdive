@@ -1,6 +1,7 @@
 import os
 import random
 import sys
+from pathlib import Path
 import torch
 
 from chat import chat, chat_qa, chat_span
@@ -9,6 +10,10 @@ from tokenizer import load_korean_chatbot_data, load_kowikitext_data, load_chatb
 from bpe import train_bpe, build_vocab, base_alphabet, encode, decode, save_bpe, load_bpe, tokenize_with_offsets
 from train_utils import make_batcher, train_loop
 import rag
+
+# langchain_rag/ 디렉토리(서빙용 검색기)를 모듈 검색 경로에 추가한다.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from langchain_rag.retriever import build_hybrid_retriever
 
 BPE_VOCAB_SIZE = 8000
 BPE_PATH = "bpe_vocab.json"
@@ -158,8 +163,8 @@ def train_stage4(model):
 
 
 def _chat_span(model):
-    tfidf_vectorizer, tfidf_matrix, embed_matrix, passages, norm_bounds = rag.build_index()
-    chat_span(model, stoi, merges, base_set, tfidf_vectorizer, tfidf_matrix, embed_matrix, norm_bounds, passages)
+    hybrid_retriever = build_hybrid_retriever()
+    chat_span(model, stoi, merges, base_set, hybrid_retriever)
 
 
 SPAN_MODES = {"train_span", "chat_span"}

@@ -6,14 +6,15 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-# model/ 디렉토리(아키텍처, BPE, 체크포인트)를 모듈 검색 경로에 추가한다.
+# model/ 디렉토리(아키텍처, BPE, 체크포인트)와 langchain_rag/ 디렉토리(검색기)를 모듈 검색 경로에 추가한다.
 MODEL_DIR = Path(__file__).resolve().parent.parent / "model"
 sys.path.insert(0, str(MODEL_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from model import device, SOP_GPT, SOP_GPT_Span
 from bpe import build_vocab, base_alphabet, tokenize, decode, load_bpe
 from chat import extract_answer
-import rag
+from langchain_rag.retriever import build_hybrid_retriever
 
 BPE_PATH = MODEL_DIR / "bpe_vocab.json"
 GEN_CKPT = MODEL_DIR / "SOP_GPT.pt"        # Stage 1: 이어쓰기
@@ -39,7 +40,7 @@ span_model = SOP_GPT_Span(vocab_size).to(device)
 span_model.load_state_dict(torch.load(SPAN_CKPT, map_location=device))
 span_model.eval()
 
-rag_tfidf_vectorizer, rag_tfidf_matrix, rag_embed_matrix, rag_passages, rag_norm_bounds = rag.build_index()
+rag_retriever = build_hybrid_retriever()
 
 # "." / "?" / "!"로 끝나는 토큰 -> 한 문장이 끝나면 멈춤 (이어쓰기 모드)
 SENTENCE_STOP_TOKENS = {i for t, i in stoi.items() if t and t[-1] in ".?!"}
@@ -91,9 +92,7 @@ def generate(req: GenerateRequest):
 def chat(req: ChatRequest):
     """검색 유사도가 충분히 높으면(RAG_SIM_THRESHOLD 이상) Stage4 추출형 QA로 KorQuAD 문서에서
     정답 구간을 직접 뽑아 답하고, 관련 문서가 없으면 Stage2 잡담형 모델로 자연스럽게 답한다."""
-    context, score = rag.best_match(
-        req.question, rag_tfidf_vectorizer, rag_tfidf_matrix, rag_embed_matrix, rag_norm_bounds, rag_passages
-    )
+    context, score = rag_retriever.best_match(req.question)
 
     if score >= RAG_SIM_THRESHOLD:
         answer = extract_answer(span_model, stoi, merges, base_set, req.question, context)

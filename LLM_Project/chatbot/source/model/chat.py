@@ -2,7 +2,6 @@ import torch
 
 from model import device, block_size
 from bpe import tokenize, decode, tokenize_with_offsets, decompose, compose
-import rag
 
 def chat(model, stoi, itos, merges, base_set):
     model.load_state_dict(torch.load("SOP_GPT.pt", map_location=device))
@@ -73,7 +72,7 @@ def extract_answer(model, stoi, merges, base_set, question, context):
     return compose(decomposed[char_start:char_end])
 
 
-def chat_span(model, stoi, merges, base_set, tfidf_vectorizer, tfidf_matrix, embed_matrix, norm_bounds, passages):
+def chat_span(model, stoi, merges, base_set, hybrid_retriever):
     """Stage 4: 질문과 가장 유사한 KorQuAD 청크를 검색해, 그 안에서 정답 구간을 직접 추출하는 RAG REPL."""
     model.load_state_dict(torch.load("SOP_GPT_span.pt", map_location=device))
     model.eval()
@@ -85,7 +84,7 @@ def chat_span(model, stoi, merges, base_set, tfidf_vectorizer, tfidf_matrix, emb
             break
         if not question:
             break
-        context = rag.retrieve(question, tfidf_vectorizer, tfidf_matrix, embed_matrix, norm_bounds, passages, top_k=1)[0]
+        context = hybrid_retriever.retrieve(question, top_k=1)[0]
         answer = extract_answer(model, stoi, merges, base_set, question, context)
         print("참고:", context)
         print("답변:", answer)
