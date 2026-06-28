@@ -7,6 +7,7 @@
 !README*.md
 !version.md
 !plan.md
+!eval.md
 .env
 api_keys
 *.pt
