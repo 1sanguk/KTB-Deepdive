@@ -1,28 +1,36 @@
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+_ROOT = Path(__file__).resolve().parent.parent.parent
+load_dotenv(_ROOT / ".env")
+load_dotenv(_ROOT / "api_keys")
 
 import torch
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-# model/ 디렉토리(아키텍처, BPE, 체크포인트)와 langchain_rag/ 디렉토리(검색기)를 모듈 검색 경로에 추가한다.
 MODEL_DIR = Path(__file__).resolve().parent.parent / "model"
 sys.path.insert(0, str(MODEL_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from model import device, SOP_GPT, SOP_GPT_Span
-from bpe import build_vocab, base_alphabet, tokenize, decode, load_bpe
-from chat import extract_answer
-from langchain_rag.retriever import build_hybrid_retriever
+from bpe import build_vocab, base_alphabet, load_bpe
+from lc.llm import SOP_GPT_LLM, make_span_extractor
+from lc.chain import build_basic_chain, build_rag_chain
+from lc.retriever import build_hybrid_retriever
+from rag.rag import build_tfidf_retriever
 
 BPE_PATH = MODEL_DIR / "bpe_vocab.json"
-GEN_CKPT = MODEL_DIR / "SOP_GPT.pt"        # Stage 1: 이어쓰기
-QA_CKPT = MODEL_DIR / "SOP_GPT_qa.pt"      # Stage 2: 잡담형 Q&A (RAG 폴백용)
-SPAN_CKPT = MODEL_DIR / "SOP_GPT_span.pt"  # Stage 4: 추출형 RAG QA
+GEN_CKPT = MODEL_DIR / "SOP_GPT.pt"
+QA_CKPT = MODEL_DIR / "SOP_GPT_qa.pt"
+SPAN_CKPT = MODEL_DIR / "SOP_GPT_span.pt"
 
-RAG_SIM_THRESHOLD = 0.515  # TF-IDF+임베딩 하이브리드 점수 기준 (held-out 검증 최적값, 정확도 82.7%)
+RAG_SIM_THRESHOLD = 0.515   # LangChain 하이브리드 held-out 검증 최적값 (정확도 82.7%)
+TFIDF_SIM_THRESHOLD = 0.25  # TF-IDF 단독 임계값 (Phase 7 기준)
 
+# ── 모델 & 토크나이저 로드 ──────────────────────────────────────────────────────
 vocab, merges = load_bpe(BPE_PATH)
 stoi, itos = build_vocab(vocab)
 vocab_size = len(vocab)
@@ -40,20 +48,29 @@ span_model = SOP_GPT_Span(vocab_size).to(device)
 span_model.load_state_dict(torch.load(SPAN_CKPT, map_location=device))
 span_model.eval()
 
-rag_retriever = build_hybrid_retriever()
+# ── 검색기 ─────────────────────────────────────────────────────────────────────
+tfidf_retriever = build_tfidf_retriever()
+lc_retriever = build_hybrid_retriever()
 
-# "." / "?" / "!"로 끝나는 토큰 -> 한 문장이 끝나면 멈춤 (이어쓰기 모드)
-SENTENCE_STOP_TOKENS = {i for t, i in stoi.items() if t and t[-1] in ".?!"}
-# "\n"으로 끝나는 토큰 -> "답변: ..." 한 줄이 끝나면 멈춤 (Q&A 모드)
-LINE_STOP_TOKENS = {i for t, i in stoi.items() if t.endswith("\n")}
+# ── LangChain 컴포넌트 ─────────────────────────────────────────────────────────
+gen_llm = SOP_GPT_LLM(
+    torch_model=gen_model, stoi=stoi, itos=itos, merges=merges, base_set=base_set,
+    stop_on="sentence", temperature=0.7, top_k=None, top_p=0.9,
+    repetition_penalty=1.3, max_new_tokens=200,
+)
+qa_llm = SOP_GPT_LLM(
+    torch_model=qa_model, stoi=stoi, itos=itos, merges=merges, base_set=base_set,
+    stop_on="line", temperature=0.8, top_k=40,
+    repetition_penalty=1.3, max_new_tokens=60,
+)
+span_extractor_fn = make_span_extractor(span_model, stoi, merges, base_set)
 
-START_ID = 0  # 입력 토큰이 없을 때 사용할 시작 토큰
+# ── LCEL 체인 ──────────────────────────────────────────────────────────────────
+basic_chain = build_basic_chain(qa_llm)
+tfidf_rag_chain = build_rag_chain(tfidf_retriever, qa_llm, span_extractor_fn, TFIDF_SIM_THRESHOLD)
+lc_rag_chain = build_rag_chain(lc_retriever, qa_llm, span_extractor_fn, RAG_SIM_THRESHOLD)
 
-
-def encode(text):
-    return [stoi[t] for t in tokenize(text, merges, base_set) if t in stoi]
-
-
+# ── FastAPI ────────────────────────────────────────────────────────────────────
 app = FastAPI(title="SOP_GPT 한국어 챗봇")
 
 
@@ -78,34 +95,30 @@ class ChatResponse(BaseModel):
 
 @app.post("/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest):
-    """Stage 1: 입력 문장을 이어써서 완전한 문장으로 끝낸다."""
-    ids = encode(req.prompt) or [START_ID]
-    idx = torch.tensor([ids], dtype=torch.long, device=device)
-    out = gen_model.generate(
-        idx, req.max_new_tokens,
-        stop_tokens=SENTENCE_STOP_TOKENS, temperature=0.7, top_p=0.9, repetition_penalty=1.3,
-    )[0].tolist()
-    return GenerateResponse(text=decode(out[len(ids):], itos))
+    """Stage 1: gen_llm 으로 입력 문장을 이어써서 완전한 문장으로 끝낸다."""
+    text = gen_llm.invoke(req.prompt)
+    return GenerateResponse(text=text)
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    """검색 유사도가 충분히 높으면(RAG_SIM_THRESHOLD 이상) Stage4 추출형 QA로 KorQuAD 문서에서
-    정답 구간을 직접 뽑아 답하고, 관련 문서가 없으면 Stage2 잡담형 모델로 자연스럽게 답한다."""
-    context, score = rag_retriever.best_match(req.question)
+@app.post("/chat/basic", response_model=ChatResponse)
+def chat_basic(req: ChatRequest):
+    """basic_chain: 검색 없이 QA LLM 으로 직접 답변 (Stage 2)."""
+    answer = basic_chain.invoke(req.question)
+    return ChatResponse(answer=answer, retrieved_context="", used_rag=False)
 
-    if score >= RAG_SIM_THRESHOLD:
-        answer = extract_answer(span_model, stoi, merges, base_set, req.question, context)
-        return ChatResponse(answer=answer, retrieved_context=context, used_rag=True)
 
-    prompt = f"질문: {req.question}\n답변: "
-    ids = encode(prompt)
-    idx = torch.tensor([ids], dtype=torch.long, device=device)
-    out = qa_model.generate(
-        idx, 60,
-        stop_tokens=LINE_STOP_TOKENS, temperature=0.8, top_k=40, repetition_penalty=1.3,
-    )[0].tolist()
-    return ChatResponse(answer=decode(out[len(ids):], itos).strip(), retrieved_context="", used_rag=False)
+@app.post("/chat/rag", response_model=ChatResponse)
+def chat_rag(req: ChatRequest):
+    """tfidf_rag_chain: TF-IDF 검색 + 유사도 라우팅 → Span 추출 or QA 폴백."""
+    result = tfidf_rag_chain.invoke(req.question)
+    return ChatResponse(**result)
+
+
+@app.post("/chat/langchain", response_model=ChatResponse)
+def chat_langchain(req: ChatRequest):
+    """lc_rag_chain: LangChain BM25+FAISS 하이브리드 검색 + 유사도 라우팅."""
+    result = lc_rag_chain.invoke(req.question)
+    return ChatResponse(**result)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -117,46 +130,52 @@ def index():
   <meta charset="utf-8">
   <title>SOP_GPT 한국어 챗봇</title>
   <style>
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      margin: 0;
       background: #f7f7f8;
       color: #1a1a1a;
       height: 100vh;
       display: flex;
       justify-content: center;
     }
-    .app { width: 100%; max-width: 720px; display: flex; flex-direction: column; height: 100vh; }
+    .app { width: 100%; max-width: 760px; display: flex; flex-direction: column; height: 100vh; }
 
+    /* ── 모드 선택 화면 ── */
     #select-view {
       flex: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 24px;
-      padding: 24px;
+      gap: 32px;
+      padding: 32px 24px;
       text-align: center;
     }
-    #select-view h1 { margin: 0; font-size: 24px; }
-    #select-view p { margin: 0; color: #666; }
-    .mode-buttons { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
+    #select-view h1 { font-size: 26px; font-weight: 700; }
+    #select-view p { color: #666; font-size: 14px; }
+    .mode-cards { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
     .mode-card {
-      width: 200px;
-      padding: 24px;
-      border: 1px solid #e0e0e0;
-      border-radius: 12px;
+      width: 210px;
+      padding: 28px 20px;
+      border: 1.5px solid #e0e0e0;
+      border-radius: 14px;
       background: #fff;
       cursor: pointer;
-      transition: box-shadow 0.15s, transform 0.15s;
+      transition: box-shadow 0.15s, transform 0.15s, border-color 0.15s;
       text-align: left;
     }
-    .mode-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateY(-2px); }
-    .mode-card h3 { margin: 0 0 8px; font-size: 16px; }
-    .mode-card p { margin: 0; font-size: 13px; color: #888; }
+    .mode-card:hover {
+      box-shadow: 0 6px 18px rgba(0,0,0,0.09);
+      transform: translateY(-3px);
+      border-color: #2563eb;
+    }
+    .mode-card .icon { font-size: 28px; margin-bottom: 12px; }
+    .mode-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+    .mode-card p { font-size: 12px; color: #888; line-height: 1.5; }
 
-    .chat-view { flex: 1; display: none; flex-direction: column; height: 100vh; }
+    /* ── 채팅 화면 ── */
+    #chat-view { flex: 1; display: none; flex-direction: column; height: 100vh; }
     .chat-header {
       display: flex;
       align-items: center;
@@ -165,18 +184,63 @@ def index():
       border-bottom: 1px solid #e5e5e5;
       background: #fff;
     }
-    .back-btn { border: none; background: none; font-size: 14px; color: #555; cursor: pointer; padding: 6px 10px; border-radius: 6px; }
+    .back-btn {
+      border: none;
+      background: none;
+      font-size: 13px;
+      color: #555;
+      cursor: pointer;
+      padding: 6px 10px;
+      border-radius: 6px;
+    }
     .back-btn:hover { background: #f0f0f0; }
-    .chat-title { font-size: 15px; font-weight: 600; }
+    #chat-title { font-size: 15px; font-weight: 600; }
+    .mode-badge {
+      margin-left: auto;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: #eff6ff;
+      color: #2563eb;
+      font-weight: 500;
+    }
 
-    .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-    .msg { max-width: 80%; padding: 10px 14px; border-radius: 16px; line-height: 1.5; font-size: 14px; white-space: pre-wrap; }
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 78%;
+      padding: 10px 14px;
+      border-radius: 16px;
+      line-height: 1.55;
+      font-size: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     .msg.user { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
     .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #e5e5e5; border-bottom-left-radius: 4px; }
-    .msg.loading { color: #999; font-style: italic; }
-    .rag-context { align-self: flex-start; max-width: 80%; font-size: 11px; color: #999; margin-top: -6px; padding: 0 4px; }
+    .msg.loading { color: #aaa; font-style: italic; }
+    .rag-label {
+      align-self: flex-start;
+      font-size: 11px;
+      color: #999;
+      margin-top: -6px;
+      padding: 0 6px;
+      max-width: 78%;
+    }
 
-    .input-area { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid #e5e5e5; background: #fff; }
+    .input-area {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid #e5e5e5;
+      background: #fff;
+    }
     .input-area input {
       flex: 1;
       padding: 10px 14px;
@@ -184,6 +248,7 @@ def index():
       border-radius: 20px;
       font-size: 14px;
       outline: none;
+      font-family: inherit;
     }
     .input-area input:focus { border-color: #2563eb; }
     .input-area button {
@@ -194,124 +259,117 @@ def index():
       color: #fff;
       font-size: 14px;
       cursor: pointer;
+      font-family: inherit;
     }
     .input-area button:hover { background: #1d4ed8; }
-    .input-area button:disabled { background: #aac; cursor: default; }
+    .input-area button:disabled { background: #93b4f5; cursor: default; }
   </style>
 </head>
 <body>
   <div class="app">
+
+    <!-- 모드 선택 화면 -->
     <div id="select-view">
-      <h1>SOP_GPT 한국어 챗봇</h1>
-      <p>모드를 선택하세요</p>
-      <div class="mode-buttons">
-        <div class="mode-card" onclick="showView('generate')">
-          <h3>이어쓰기</h3>
-          <p>문장을 입력하면 이어서 완성된 문장을 생성합니다.</p>
+      <div>
+        <h1>SOP_GPT 한국어 챗봇</h1>
+        <p style="margin-top:8px">검색 방식을 선택하세요</p>
+      </div>
+      <div class="mode-cards">
+        <div class="mode-card" onclick="startChat('basic', '기본 모델', 'basic')">
+          <div class="icon">💬</div>
+          <h3>기본 모델</h3>
+          <p>검색 없이 QA LLM이 직접 답변합니다. (Stage 2)</p>
         </div>
-        <div class="mode-card" onclick="showView('chat')">
-          <h3>Q&amp;A</h3>
-          <p>질문을 입력하면 답변을 생성합니다.</p>
+        <div class="mode-card" onclick="startChat('rag', 'RAG 기반 검색', 'rag')">
+          <div class="icon">🔍</div>
+          <h3>RAG 기반 검색</h3>
+          <p>TF-IDF로 관련 문서를 검색한 뒤 추출형 QA로 답변합니다.</p>
+        </div>
+        <div class="mode-card" onclick="startChat('langchain', 'LangChain 기반 검색', 'langchain')">
+          <div class="icon">⚡</div>
+          <h3>LangChain 기반 검색</h3>
+          <p>BM25 + FAISS 하이브리드 검색 후 추출형 QA로 답변합니다.</p>
         </div>
       </div>
     </div>
 
-    <div id="generate-view" class="chat-view">
+    <!-- 채팅 화면 (공유) -->
+    <div id="chat-view">
       <div class="chat-header">
-        <button class="back-btn" onclick="showView('select')">&larr; 뒤로</button>
-        <div class="chat-title">이어쓰기</div>
+        <button class="back-btn" onclick="goBack()">← 뒤로</button>
+        <span id="chat-title">채팅</span>
+        <span class="mode-badge" id="mode-badge"></span>
       </div>
-      <div class="messages" id="gen-messages"></div>
+      <div class="messages" id="messages"></div>
       <div class="input-area">
-        <input id="gen-input" placeholder="예: 오늘 날씨는" autocomplete="off">
-        <button id="gen-btn" onclick="sendGenerate()">입력</button>
+        <input id="msg-input" placeholder="질문을 입력하세요" autocomplete="off">
+        <button id="send-btn" onclick="send()">전송</button>
       </div>
     </div>
 
-    <div id="chat-view" class="chat-view">
-      <div class="chat-header">
-        <button class="back-btn" onclick="showView('select')">&larr; 뒤로</button>
-        <div class="chat-title">Q&amp;A</div>
-      </div>
-      <div class="messages" id="chat-messages"></div>
-      <div class="input-area">
-        <input id="chat-input" placeholder="예: 오늘 기분 어때?" autocomplete="off">
-        <button id="chat-btn" onclick="sendChat()">입력</button>
-      </div>
-    </div>
   </div>
 
   <script>
-    function showView(name) {
-      document.getElementById('select-view').style.display = name === 'select' ? 'flex' : 'none';
-      document.getElementById('generate-view').style.display = name === 'generate' ? 'flex' : 'none';
-      document.getElementById('chat-view').style.display = name === 'chat' ? 'flex' : 'none';
+    let currentEndpoint = '';
+
+    function startChat(mode, title, badge) {
+      currentEndpoint = '/chat/' + mode;
+      document.getElementById('chat-title').textContent = title;
+      document.getElementById('mode-badge').textContent = badge;
+      document.getElementById('messages').innerHTML = '';
+      document.getElementById('select-view').style.display = 'none';
+      document.getElementById('chat-view').style.display = 'flex';
+      document.getElementById('chat-view').style.flexDirection = 'column';
+      document.getElementById('msg-input').focus();
     }
 
-    function addMessage(containerId, className, text) {
-      const container = document.getElementById(containerId);
+    function goBack() {
+      document.getElementById('select-view').style.display = 'flex';
+      document.getElementById('chat-view').style.display = 'none';
+      currentEndpoint = '';
+    }
+
+    function addMsg(cls, text) {
+      const box = document.getElementById('messages');
       const div = document.createElement('div');
-      div.className = 'msg ' + className;
+      div.className = 'msg ' + cls;
       div.textContent = text;
-      container.appendChild(div);
-      container.scrollTop = container.scrollHeight;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
       return div;
     }
 
-    async function sendGenerate() {
-      const input = document.getElementById('gen-input');
-      const btn = document.getElementById('gen-btn');
-      const prompt = input.value.trim();
-      if (!prompt) return;
-
-      addMessage('gen-messages', 'user', prompt);
-      input.value = '';
-      btn.disabled = true;
-      const loading = addMessage('gen-messages', 'assistant loading', '생성 중...');
-
-      try {
-        const res = await fetch('/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt }),
-        });
-        const data = await res.json();
-        loading.textContent = prompt + data.text;
-        loading.className = 'msg assistant';
-      } catch (e) {
-        loading.textContent = '오류가 발생했습니다.';
-        loading.className = 'msg assistant';
-      } finally {
-        btn.disabled = false;
-        input.focus();
-      }
+    function addLabel(text) {
+      const box = document.getElementById('messages');
+      const div = document.createElement('div');
+      div.className = 'rag-label';
+      div.textContent = text;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
     }
 
-    async function sendChat() {
-      const input = document.getElementById('chat-input');
-      const btn = document.getElementById('chat-btn');
+    async function send() {
+      const input = document.getElementById('msg-input');
+      const btn = document.getElementById('send-btn');
       const question = input.value.trim();
-      if (!question) return;
+      if (!question || !currentEndpoint) return;
 
-      addMessage('chat-messages', 'user', question);
+      addMsg('user', question);
       input.value = '';
       btn.disabled = true;
-      const loading = addMessage('chat-messages', 'assistant loading', '생성 중...');
+      const loading = addMsg('assistant loading', '생성 중…');
 
       try {
-        const res = await fetch('/chat', {
+        const res = await fetch(currentEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question }),
         });
         const data = await res.json();
-        loading.textContent = data.answer;
+        loading.textContent = data.answer || '(빈 응답)';
         loading.className = 'msg assistant';
-        if (data.used_rag) {
-          const ctx = document.createElement('div');
-          ctx.className = 'rag-context';
-          ctx.textContent = '참고: ' + data.retrieved_context;
-          loading.after(ctx);
+        if (data.used_rag && data.retrieved_context) {
+          addLabel('참고: ' + data.retrieved_context);
         }
       } catch (e) {
         loading.textContent = '오류가 발생했습니다.';
@@ -322,11 +380,8 @@ def index():
       }
     }
 
-    document.getElementById('gen-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) sendGenerate();
-    });
-    document.getElementById('chat-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) sendChat();
+    document.getElementById('msg-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) send();
     });
   </script>
 </body>

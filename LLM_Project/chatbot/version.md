@@ -8,6 +8,7 @@
   - [2. 생성형 RAG의 한계를 해결하기 위한 구조 변경](#2-생성형-rag의-한계를-해결하기-위한-구조-변경)
   - [3. 임계값 라우팅 오분류 개선: 검색기 하이브리드화](#3-임계값-라우팅-오분류-개선-검색기-하이브리드화)
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
+- [2026-06-28 — 모델 확장 재학습 + LangSmith 트레이싱 (3번 과제)](#2026-06-28--모델-확장-재학습--langsmith-트레이싱-3번-과제)
 - [회고](#회고)
 
 ---
@@ -69,13 +70,91 @@
 - **라이브러리 함정 발견**: 설치된 `langchain-community` 버전의 FAISS `distance_strategy=COSINE`이 `normalize_L2`를 무시하는 미구현 상태였음 → 정규화된 벡터 + 기본 EUCLIDEAN 전략(`_euclidean_relevance_score_fn`)으로 대체해 코사인 유사도와 단조 대응되는 점수를 얻음
 - **`source/model/rag.py` 정리**: 검색 관련 함수(`build_index`/`calibrate`/`_hybrid_scores`/`retrieve`/`best_match`) 제거, 학습(`train_stage4`)이 쓰는 코퍼스 로딩 함수만 남김. `app.py`/`chat.py`/`main.py`의 5-tuple 호출부를 `HybridRetriever` 객체 하나로 단순화
 - **검증**: 실제 KorQuAD 질문 8개 + 잡담 질문 3개로 라우팅 정확도 8/11 확인 — 기존 TF-IDF+임베딩 하이브리드의 held-out 정확도(82.7%)와 비슷한 수준
-- **`source/test.py` 스모크 테스트 추가**: Colab 등 외부 환경에서 체크포인트나 `bpe_vocab.json` 없이 `HybridRetriever`만 검증할 수 있는 단일 파일 테스트
-- 의존성 추가: `langchain`, `langchain-community`, `langchain-huggingface`, `faiss-cpu`, `rank_bm25` (requirements 파일이 없는 기존 컨벤션대로 직접 설치만 함)
-- **알아낸 한계**: 로컬 체크포인트(`SOP_GPT*.pt`)는 git에 들어있지만 `bpe_vocab.json`은 git에 없어서, 이 작업 환경에서는 FastAPI `/chat` 엔드포인트 전체(생성 모델 포함)를 띄워서 검증하지 못했음 — 검색/라우팅 로직만 독립적으로 검증
+- 의존성 추가: `langchain`, `langchain-community`, `langchain-huggingface`, `faiss-cpu`, `rank_bm25`
+
+## 2026-06-27 — LangChain 전체 파이프라인 마이그레이션 (1번·2번 과제 완료)
+
+> SOP_GPT 모델 자체를 LangChain `LLM`으로 래핑하고, LCEL(`|` 연산자)로 검색기와 LLM을 연결하는 체인을 조립했습니다. 서버를 3개 모드로 나누고, 파이프라인 전체를 스모크 테스트로 검증했습니다.
+
+### LangChain LLM 래퍼 및 LCEL 체인 (`source/lc/`)
+
+- **`source/lc/llm.py` 신설**: `SOP_GPT_LLM(LLM)` — PyTorch 모델을 LangChain `BaseLLM`으로 래핑. `stop_on="line"`(QA, `\n`에서 중단) / `stop_on="sentence"`(이어쓰기, `.?!`에서 중단) 두 가지 동작 모드. PyTorch Tensor를 Pydantic 필드로 두기 위해 `model_config = ConfigDict(arbitrary_types_allowed=True)` 적용
+- **`source/lc/llm.py` — `make_span_extractor()`**: `SOP_GPT_Span`을 `RunnableLambda` 주입용 클로저로 래핑. `{"question": str, "context": str} → str` 인터페이스라 LangChain 표준 LLM(`str → str`)과 맞지 않아 별도 팩토리로 분리
+- **`source/lc/chain.py` 신설**:
+  - `build_basic_chain(llm)`: `{"question": RunnablePassthrough()} | QA_PROMPT | llm | StrOutputParser()` — LCEL `|` 연산자만으로 완성
+  - `build_rag_chain(retriever, llm, span_fn, threshold)`: `RunnableLambda(retrieve_and_answer)` — 조건 분기(임계값 라우팅)가 있어 순수 `|` 체인으로 표현이 어렵고, `RunnableLambda`로 감싸되 반환값은 표준 Runnable로 유지
+- **`source/lc/` 디렉터리명**: 원래 `source/langchain/`으로 지었다가 Python이 `source/`를 `sys.path`에 넣자 실제 `langchain` 패키지를 가려버리는 import 섀도잉 문제 발생 → `source/lc/`로 이름 변경
+
+### TF-IDF 검색기 분리 (`source/rag/rag.py`)
+
+- `source/rag/__init__.py`에 몰려있던 코드를 `source/rag/rag.py`로 이동 (`__init__.py`는 `from .rag import *`만 남김)
+- **`TfidfRetriever` 클래스 추가**: `LangChain EnsembleRetriever`와 동일한 `retrieve(query)` / `best_match(query)` 인터페이스를 맞춰 `build_rag_chain()`에 그대로 꽂을 수 있도록 설계. 임계값 0.25(raw 코사인 유사도)
+- `build_tfidf_retriever()` 팩토리 추가
+
+### 3개 모드 FastAPI 서빙 (`source/app/app.py`)
+
+- **엔드포인트 3개로 확장**: `/chat/basic`(검색 없음, QA LLM 직접) / `/chat/rag`(TF-IDF 체인) / `/chat/langchain`(LangChain 하이브리드 체인)
+- **웹 UI**: 모드 선택 카드 화면 → 선택 후 채팅 화면으로 전환. 세 모드 공통 채팅 뷰를 재사용
+
+### 스모크 테스트 (`source/test.py`)
+
+- 7개 테스트: BPE 토크나이저 왕복, `SOP_GPT_LLM.invoke()`, `basic_chain`, TF-IDF 라우팅, `tfidf_rag_chain` (RAG/폴백 경로 각각), `HybridRetriever`, `lc_rag_chain`
+- `--skip-hybrid` 플래그로 임베딩 모델 로드(1~2분)를 건너뛸 수 있음
+- 실행: `cd source && python test.py`
+
+### 의존성 확정
+
+- `rank_bm25`: `langchain_community.BM25Retriever`가 내부적으로 요구하지만 `langchain-community` 설치 시 자동으로 딸려오지 않음 — 별도 설치 필요
+- `faiss-cpu`: macOS에서는 `faiss-gpu` 미지원, `faiss-cpu`로 대체
+
+## 2026-06-28 — 모델 확장 재학습 + LangSmith 트레이싱 (3번 과제)
+
+### 모델 아키텍처 확장 및 재학습
+
+- **모델 하이퍼파라미터 확장**: `n_embd 256→512`, `n_head 4→8`, `n_layer 6→12`, `block_size 128→256` — 파라미터 수 약 600만 → 약 5천만으로 증가
+- **RAM 절감 학습 최적화**: `batch_size 64→16` + `gradient accumulation(accum_steps=4)` — 유효 배치 크기(64) 유지하면서 활성화 메모리 4배 절감
+- **데이터 파이프라인 메모리 최적화**: `chatbot_text * 15` 문자열 업샘플링 → 텐서 인코딩 후 `tensor.repeat(15)` 로 변경 — Python 리스트(토큰당 ~28B) 중간 복사본 제거로 피크 RAM 대폭 감소, 인코딩 후 즉시 `del` + `gc.collect()` 적용
+- **순차 학습 스크립트 `train_all.sh`**: Stage 1 → Stage 2 → Stage 4를 하나의 스크립트로 순차 실행, 타임스탬프 포함 로그 기록. `caffeinate -w PID`로 맥북 뚜껑 닫은 상태에서도 학습 유지
+- **재학습 결과**:
+  - Stage 1 (이어쓰기): val loss **3.355** (step 3860 early stop)
+  - Stage 2 (Q&A): val loss **2.657** (step 1280 early stop)
+  - Stage 4 (추출형 QA): val loss **3.092** (step 1660 early stop)
+
+### LangSmith 트레이싱 연동
+
+- **환경 설정 분리**: `.env`(비밀 아닌 설정: tracing on/off, APAC 엔드포인트, 프로젝트명) + `api_keys`(실제 키 값) 두 파일로 분리 보관, 둘 다 gitignore 처리
+- **`app.py` 최상단 `load_dotenv`**: 모든 langchain import보다 먼저 실행해야 트레이싱 env var가 제때 인식됨 — `LANGSMITH_TRACING` + `LANGCHAIN_TRACING_V2` 두 변수 모두 설정(버전 호환)
+- **APAC 엔드포인트 사용**: `https://apac.api.smith.langchain.com` — 기본 US 엔드포인트 대신 APAC으로 지정
+- **트레이싱 확인**: `retrieve_and_answer`, `SOP_GPT_LLM` 체인 실행 기록이 LangSmith `adapterz-langchain-textbook` 프로젝트에 실시간 수집됨
+
+### Dataset 기반 평가 (`source/evaluate.py`)
+
+- **Dataset**: KorQuAD v1.0 dev set 30개 질문/정답을 LangSmith `sop-gpt-korquad`로 업로드
+- **Evaluator**: `contains_match` — 정답 텍스트가 예측 답변에 포함되면 1점
+- **결과**:
+
+  | 체인 | contains_match |
+  |------|---------------|
+  | `basic` (검색 없음) | 0.0% (0/30) |
+  | `tfidf_rag` (TF-IDF + Span 추출) | 20.0% (6/30) |
+  | `lc_rag` (BM25+FAISS + Span 추출) | 20.0% (6/30) |
+
+- 검색 없이는 KorQuAD 사실형 질문에 정답 포함률 0%, 검색을 붙이면 20%로 상승. 세부 해석은 [basicdata/eval.md](basicdata/eval.md) 참고
 
 ---
 
 ## 회고
+
+<details>
+<summary><b>2026-06-28 — 모델을 키운다고 항상 빠르게 좋아지는 건 아니다</b></summary>
+
+- **메모리 제약이 오히려 코드를 더 잘 이해하게 만들었다.** RAM 부족으로 학습이 안 된다는 문제를 마주쳤을 때, 처음엔 단순히 숫자를 줄이려 했다. 그런데 제대로 해결하려면 "왜 메모리가 부족한가"를 추적해야 했다 — `batch_size`가 활성화 메모리에 선형 비례한다는 것, `chatbot_text * 15`처럼 문자열을 Python에서 통째로 복사하면 Python int 객체(~28B/개)가 토큰 수만큼 쌓인다는 것. gradient accumulation이 왜 "유효 배치는 그대로, RAM 피크는 줄이는" 방법인지도 직접 연산해보고 나서야 설득이 됐다.
+- **순차 실행 vs 병렬 실행 선택이 "어느 게 빠른가"가 아니라 "RAM이 얼마나 있는가"로 결정됐다.** 세 학습을 동시에 돌리면 각자 모델·데이터를 따로 올리니 3배 RAM이 필요하다. 병렬이 무조건 좋은 게 아니라, 자원 제약 안에서 병렬화 가능한 수준을 따져야 한다는 걸 실제로 부딪히고 배웠다.
+- **LangSmith 트레이싱은 "설정만 하면 끝"이라는 인상과 달리 순서에 민감했다.** `load_dotenv`를 langchain import보다 나중에 두면 env var가 인식 안 된다. import 순서가 왜 중요한지, 모듈이 언제 env var를 읽는지를 트레이싱이 안 뜨는 상황에서 역추적하며 이해했다. 환경 설정도 코드처럼 "언제 실행되는가"가 중요하다.
+- **API 키를 코드와 분리하는 건 습관의 문제다.** 처음에 키를 `.env`에 바로 넣었는데, 이후 `api_keys`로 따로 분리했다. 어느 파일이 git에 올라가는지, 어느 파일에 시크릿을 두어야 하는지를 매번 의식적으로 결정하는 연습이 됐다. 나중에 팀 프로젝트에서 실수하지 않으려면 지금 이 습관을 들여놓는 게 맞다.
+- **val loss 숫자가 줄었다고 체감 품질이 같은 비율로 좋아지지 않는다.** 모델을 8배 키웠지만 답변의 시원찮은 느낌은 크게 달라지지 않았다. 데이터 규모와 모델 규모 사이에 균형이 있고, 지금 학습 데이터(챗봇 1만 쌍 + KorQuAD)는 5천만 파라미터 모델을 충분히 학습시키기엔 부족하다. 모델 크기와 데이터 크기는 함께 키워야 한다는 scaling law를 숫자로 체감했다.
+
+</details>
 
 <details>
 <summary><b>2026-06-20 — 검색기 하이브리드화: "정규화"라는 단어 하나로도 결과가 완전히 달라진다</b></summary>

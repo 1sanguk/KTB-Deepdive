@@ -1,3 +1,4 @@
+import gc
 import os
 import random
 import sys
@@ -8,12 +9,12 @@ from chat import chat, chat_qa, chat_span
 from model import device, steps, lr, SOP_GPT, SOP_GPT_Span, block_size
 from tokenizer import load_korean_chatbot_data, load_kowikitext_data, load_chatbot_qa_data
 from bpe import train_bpe, build_vocab, base_alphabet, encode, decode, save_bpe, load_bpe, tokenize_with_offsets
-from train_utils import make_batcher, train_loop
-import rag
+from train_utils import make_batcher, train_loop, get_lr
 
-# langchain_rag/ 디렉토리(서빙용 검색기)를 모듈 검색 경로에 추가한다.
+# rag/ 패키지와 langchain/ 디렉토리(서빙용 검색기)를 모듈 검색 경로에 추가한다.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from langchain_rag.retriever import build_hybrid_retriever
+import rag
+from lc.retriever import build_hybrid_retriever
 
 BPE_VOCAB_SIZE = 8000
 BPE_PATH = "bpe_vocab.json"
@@ -59,13 +60,24 @@ def train_stage1(model):
     # 데이터 누수(val loss가 실제보다 좋게 나오는 현상)를 피할 수 있다.
     n_kowiki_train = int(0.9 * len(kowiki_text))
     n_chat_train = int(0.9 * len(chatbot_text))
-    train_text = kowiki_text[:n_kowiki_train] + "\n" + chatbot_text[:n_chat_train] * STAGE1_CHATBOT_UPSAMPLE
-    val_text = kowiki_text[n_kowiki_train:] + "\n" + chatbot_text[n_chat_train:] * STAGE1_CHATBOT_UPSAMPLE
-    print(f"kowiki {len(kowiki_text):,} chars, chatbot(x{STAGE1_CHATBOT_UPSAMPLE}) "
-          f"{len(chatbot_text) * STAGE1_CHATBOT_UPSAMPLE:,} chars")
+    print(f"kowiki {len(kowiki_text[:n_kowiki_train]):,} chars, chatbot(x{STAGE1_CHATBOT_UPSAMPLE}) "
+          f"{len(chatbot_text[:n_chat_train]) * STAGE1_CHATBOT_UPSAMPLE:,} chars")
 
-    train_data = torch.tensor(encode(train_text, merges, stoi, base_set), dtype=torch.long)
-    val_data = torch.tensor(encode(val_text, merges, stoi, base_set), dtype=torch.long)
+    # 문자열 *(15)를 피하고 텐서 repeat으로 업샘플링:
+    # 기존 방식은 "kowiki + chatbot*15" 거대 문자열 → Python 리스트 → 텐서 순으로 RAM에 세 벌이 뜬다.
+    # 아래 방식은 각각 인코딩 후 즉시 문자열을 해제하고, repeat은 텐서 수준에서만 수행한다.
+    train_kowiki = torch.tensor(encode(kowiki_text[:n_kowiki_train], merges, stoi, base_set), dtype=torch.long)
+    val_kowiki   = torch.tensor(encode(kowiki_text[n_kowiki_train:],  merges, stoi, base_set), dtype=torch.long)
+    del kowiki_text; gc.collect()
+
+    train_chatbot = torch.tensor(encode(chatbot_text[:n_chat_train], merges, stoi, base_set), dtype=torch.long)
+    val_chatbot   = torch.tensor(encode(chatbot_text[n_chat_train:],  merges, stoi, base_set), dtype=torch.long)
+    del chatbot_text; gc.collect()
+
+    train_data = torch.cat([train_kowiki, train_chatbot.repeat(STAGE1_CHATBOT_UPSAMPLE)])
+    val_data   = torch.cat([val_kowiki,   val_chatbot.repeat(STAGE1_CHATBOT_UPSAMPLE)])
+    del train_kowiki, val_kowiki, train_chatbot, val_chatbot; gc.collect()
+
     print(f"train {len(train_data):,} tokens, val {len(val_data):,} tokens, vocab_size: {vocab_size}, device: {device}")
 
     get_batch = make_batcher(train_data, val_data)
@@ -82,9 +94,12 @@ def train_stage1(model):
 
 
 def train_stage2(model):
-    text = load_chatbot_qa_data()
+    chatbot_text = load_chatbot_qa_data()
+    korquad_text = rag.load_korquad_qa_data()   # train+dev ~60K QA쌍 추가
+    text = chatbot_text + korquad_text
     data = torch.tensor(encode(text, merges, stoi, base_set), dtype=torch.long)
-    print(f"qa text length: {len(text):,} chars, {len(data):,} tokens, vocab_size: {vocab_size}, device: {device}")
+    print(f"qa text: chatbot {len(chatbot_text):,} + korquad {len(korquad_text):,} chars"
+          f" = {len(text):,} chars, {len(data):,} tokens, vocab_size: {vocab_size}, device: {device}")
 
     n_train = int(0.9 * len(data))
     get_batch = make_batcher(data[:n_train], data[n_train:])
@@ -133,12 +148,18 @@ def train_stage4(model):
     print(f"loaded body weights from {QA_CKPT}, training qa_head from scratch, device={device}")
 
     opt = torch.optim.AdamW(model.parameters(), lr=SPAN_LR)
+    min_lr = SPAN_LR * 0.1
     best_val, best_state, no_improve = float("inf"), None, 0
     for step in range(SPAN_STEPS):
+        cur_lr = get_lr(step, SPAN_LR, min_lr, warmup_steps=100, total_steps=SPAN_STEPS)
+        for pg in opt.param_groups:
+            pg["lr"] = cur_lr
+
         ids, starts, ends = _span_batch(train_examples, SPAN_BATCH_SIZE)
         _, _, loss = model(ids, starts, ends)
         opt.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         if step % 20 == 0 or step == SPAN_STEPS - 1:
             model.eval()
@@ -147,7 +168,7 @@ def train_stage4(model):
                     model(*_span_batch(val_examples, SPAN_BATCH_SIZE))[2].item() for _ in range(20)
                 ) / 20
             model.train()
-            print(f"step {step:5d}  train {loss.item():.3f}  val {val_loss:.3f}", flush=True)
+            print(f"step {step:5d}  lr {cur_lr:.2e}  train {loss.item():.3f}  val {val_loss:.3f}", flush=True)
             if val_loss < best_val - EARLY_STOP_MIN_DELTA:
                 best_val, best_state, no_improve = val_loss, {k: v.clone() for k, v in model.state_dict().items()}, 0
             else:

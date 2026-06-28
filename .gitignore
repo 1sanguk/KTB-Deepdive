@@ -7,3 +7,10 @@
 !README*.md
 !version.md
 !plan.md
+.env
+api_keys
+*.pt
+nohup.out
+*.log
+train_all.sh
+test.py

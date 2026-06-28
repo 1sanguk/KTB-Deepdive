@@ -3,11 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # --- hyperparameters ---
-block_size = 128     # max context length
-n_embd = 256         # embedding dimension
-n_head = 4           # attention heads
-n_layer = 6          # transformer blocks
-batch_size = 64
+block_size = 256     # max context length
+n_embd = 512         # embedding dimension
+n_head = 8           # attention heads
+n_layer = 12          # transformer blocks
+batch_size = 16   # gradient accumulation으로 유효 배치 크기(64)를 유지 — 활성화 메모리 4x 절감
 steps = 20000
 lr = 1e-3
 dropout = 0.2
@@ -74,7 +74,8 @@ class SOP_GPT(nn.Module):
         self.pos_emb = nn.Embedding(block_size, n_embd)
         self.blocks = nn.Sequential(*[Block() for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd)
-        self.head = nn.Linear(n_embd, vocab_size)
+        self.head = nn.Linear(n_embd, vocab_size, bias=False)
+        self.head.weight = self.tok_emb.weight  # weight tying: 파라미터 절약 + 임베딩-출력 일관성
 
     def forward(self, idx, targets=None):
         T = idx.shape[1]
