@@ -9,9 +9,9 @@
 - **토크나이저**: 한글을 NFD로 분해(초성/중성/종성 자모)한 뒤 BPE 적용, NFC로 재조합해 출력 (직접 구현)
 - **모델**: `CausalSelfAttention` / `Block` / `SOP_GPT`로 구성된 GPT 디코더 (block_size=256, n_embd=512, n_head=8, n_layer=12)
 - **학습 단계**
-  - **Stage 1 (이어쓰기)**: kowikitext + 한국어 챗봇 Q&A 데이터로 다음 토큰 예측 학습 → val loss 3.355
-  - **Stage 2 (Q&A 응답)**: songys/Chatbot_data(11,823쌍) + KorQuAD로 `"질문: ...\n답변: ..."` 포맷 파인튜닝 → val loss 2.657
-  - **Stage 4 (추출형 RAG QA)**: KorQuAD v1.0으로 정답의 시작/끝 토큰 **위치를 분류**하는 `SOP_GPT_Span` 학습 → val loss 3.092
+  - **Stage 1 (이어쓰기)**: kowikitext + 한국어 챗봇 Q&A 데이터 + AI Hub 한국어 대화 데이터로 다음 토큰 예측 학습
+  - **Stage 2 (Q&A 응답)**: songys/Chatbot_data(11,823쌍) + KorQuAD로 `"질문: ...\n답변: ..."` 포맷 파인튜닝
+  - **Stage 4 (추출형 RAG QA)**: KorQuAD v1.0으로 정답의 시작/끝 토큰 **위치를 분류**하는 `SOP_GPT_Span` 학습
 - **생성**: temperature / top-k / top-p / repetition penalty 샘플링 + 종결 토큰(`.`/`?`/`!`/줄바꿈) 기준 stop 조건
 - **LangChain 파이프라인**: `SOP_GPT`를 `BaseLLM`으로 래핑하고 LCEL로 검색기와 연결. 검색 방식(TF-IDF / BM25+FAISS)에 따라 체인을 교체할 수 있는 구조
 - **서빙**: FastAPI로 3개 채팅 엔드포인트 제공 + 웹 채팅 UI (모드 선택 화면 → 채팅)
@@ -19,7 +19,7 @@
 
 ## RAG 아키텍처
 
-1. **지식 베이스**: KorQuAD v1.0 dev set 문단을 ~180자 단위 청크로 분할해 인덱싱
+1. **지식 베이스**: KorQuAD v1.0 train+dev set 문단 + `ragdata/` 폴더 문서를 ~180자 단위 청크로 분할해 인덱싱
 2. **검색(Retrieve)**: 두 가지 검색기 중 선택 가능
    - **TF-IDF** (`source/rag/rag.py`): scikit-learn `TfidfVectorizer` + 코사인 유사도. 빠르고 단순.
    - **LangChain 하이브리드** (`source/lc/retriever.py`): `BM25Retriever`(sparse) + `FAISS`(dense, `jhgan/ko-sroberta-multitask`) + `EnsembleRetriever`. TF-IDF 단독보다 의미 검색이 강함.
@@ -51,6 +51,7 @@ chatbot/
 ├── .env                        # 비밀 아닌 설정 (tracing on/off, endpoint, project명) — gitignore
 ├── api_keys                    # API 키 보관 — gitignore
 ├── basicdata/                  # 참고 자료, 작업 계획, 세션 기록, 코드 설명서(info.md)
+├── ragdata/                    # RAG 검색 인덱스에 추가할 커스텀 문서 (.txt/.md)
 └── source/
     ├── app/
     │   └── app.py              # FastAPI 서빙 (LangSmith 트레이싱 포함)
@@ -129,3 +130,14 @@ python main.py chat_span     # Stage 4 RAG QA REPL
 - `GET /docs` — Swagger UI
 
 자세한 개발 과정은 [basicdata/plan.md](basicdata/plan.md), 코드 설명은 [basicdata/info.md](basicdata/info.md), 단계별 변경 이력은 [version.md](version.md), 체인 평가 결과는 [basicdata/eval.md](basicdata/eval.md) 참고.
+
+## 데이터 출처
+
+본 프로젝트의 Stage 1 학습에 AI Hub에서 제공하는 아래 데이터셋을 활용했습니다.
+
+- 011. 일상대화 한국어 멀티세션 데이터
+- 020. 주제별 텍스트 일상 대화 데이터
+- 141. 한국어 멀티세션 대화
+- 297. SNS 데이터 고도화
+
+본 AI 데이터는 **한국지능정보사회진흥원(NIA)**의 사업 결과물이며, AI Hub 이용약관에 따라 인공지능 학습 모델의 학습 목적으로만 사용합니다.

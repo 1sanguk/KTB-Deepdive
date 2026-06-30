@@ -17,7 +17,7 @@ SOURCE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SOURCE_DIR / "model"))  # tokenizer.py용
 sys.path.insert(0, str(SOURCE_DIR))             # rag 패키지용
 
-from rag import load_korquad_qa_pairs, chunk_context  # noqa: E402
+from rag import load_korquad_qa_pairs, chunk_context, load_ragdata_passages  # noqa: E402
 from tokenizer import load_korean_chatbot_data  # noqa: E402
 
 EMBED_MODEL_NAME = "jhgan/ko-sroberta-multitask"
@@ -103,12 +103,13 @@ class HybridRetriever:
         return self.passages[best_idx], float(scores[best_idx])
 
 
-def build_hybrid_retriever(root_dir=None):
-    pairs = load_korquad_qa_pairs(root_dir)
+def build_hybrid_retriever(root_dir=None, ragdata_dir=None):
+    pairs = load_korquad_qa_pairs(root_dir, include_train=True)
     contexts = {context for context, _, _, _ in pairs}  # 문단 중복 제거
     passages = []
     for context in contexts:
         passages.extend(chunk_context(context))
+    passages.extend(load_ragdata_passages(ragdata_dir))
 
     retriever = HybridRetriever(passages)
     retriever.calibrate(root_dir)

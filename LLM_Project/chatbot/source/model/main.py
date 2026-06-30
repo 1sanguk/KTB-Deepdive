@@ -7,7 +7,7 @@ import torch
 
 from chat import chat, chat_qa, chat_span
 from model import device, steps, lr, SOP_GPT, SOP_GPT_Span, block_size
-from tokenizer import load_korean_chatbot_data, load_kowikitext_data, load_chatbot_qa_data
+from tokenizer import load_korean_chatbot_data, load_kowikitext_data, load_chatbot_qa_data, load_aihub_conversation_data
 from bpe import train_bpe, build_vocab, base_alphabet, encode, decode, save_bpe, load_bpe, tokenize_with_offsets
 from train_utils import make_batcher, train_loop, get_lr
 
@@ -24,6 +24,7 @@ KOWIKI_TRAIN_CHARS = 80_000_000  # kowikitext train split은 ~1.6GB라 앞부분
 # "오늘 날씨는" 같은 구어 이어쓰기에도 위키 말투가 나오는 문제가 있었음 -> kowiki 비중을 줄이고
 # chatbot 데이터를 업샘플링(반복)해서 두 말투의 비중을 좀 더 비슷하게 맞춤
 STAGE1_KOWIKI_TRAIN_CHARS = 15_000_000
+STAGE1_AIHUB_MAX_CHARS   = 50_000_000  # 전체 33억자 중 5000만자만 사용 (OOM 방지)
 STAGE1_CHATBOT_UPSAMPLE = 15
 
 GEN_CKPT = "SOP_GPT.pt"       # Stage 1(이어쓰기) 가중치
@@ -55,13 +56,16 @@ base_set = base_alphabet(vocab)
 def train_stage1(model):
     kowiki_text = load_kowikitext_data(train_chars=STAGE1_KOWIKI_TRAIN_CHARS)
     chatbot_text = load_korean_chatbot_data()
+    aihub_text = load_aihub_conversation_data(max_chars=STAGE1_AIHUB_MAX_CHARS)
 
     # 업샘플링 전에 90/10으로 나눠야 train/val에 똑같은 chatbot 반복 구간이 동시에 들어가는
     # 데이터 누수(val loss가 실제보다 좋게 나오는 현상)를 피할 수 있다.
     n_kowiki_train = int(0.9 * len(kowiki_text))
     n_chat_train = int(0.9 * len(chatbot_text))
+    n_aihub_train = int(0.9 * len(aihub_text))
     print(f"kowiki {len(kowiki_text[:n_kowiki_train]):,} chars, chatbot(x{STAGE1_CHATBOT_UPSAMPLE}) "
-          f"{len(chatbot_text[:n_chat_train]) * STAGE1_CHATBOT_UPSAMPLE:,} chars")
+          f"{len(chatbot_text[:n_chat_train]) * STAGE1_CHATBOT_UPSAMPLE:,} chars, "
+          f"aihub {len(aihub_text[:n_aihub_train]):,} chars")
 
     # 문자열 *(15)를 피하고 텐서 repeat으로 업샘플링:
     # 기존 방식은 "kowiki + chatbot*15" 거대 문자열 → Python 리스트 → 텐서 순으로 RAM에 세 벌이 뜬다.
@@ -74,9 +78,13 @@ def train_stage1(model):
     val_chatbot   = torch.tensor(encode(chatbot_text[n_chat_train:],  merges, stoi, base_set), dtype=torch.long)
     del chatbot_text; gc.collect()
 
-    train_data = torch.cat([train_kowiki, train_chatbot.repeat(STAGE1_CHATBOT_UPSAMPLE)])
-    val_data   = torch.cat([val_kowiki,   val_chatbot.repeat(STAGE1_CHATBOT_UPSAMPLE)])
-    del train_kowiki, val_kowiki, train_chatbot, val_chatbot; gc.collect()
+    train_aihub = torch.tensor(encode(aihub_text[:n_aihub_train], merges, stoi, base_set), dtype=torch.long)
+    val_aihub   = torch.tensor(encode(aihub_text[n_aihub_train:],  merges, stoi, base_set), dtype=torch.long)
+    del aihub_text; gc.collect()
+
+    train_data = torch.cat([train_kowiki, train_chatbot.repeat(STAGE1_CHATBOT_UPSAMPLE), train_aihub])
+    val_data   = torch.cat([val_kowiki,   val_chatbot.repeat(STAGE1_CHATBOT_UPSAMPLE),   val_aihub])
+    del train_kowiki, val_kowiki, train_chatbot, val_chatbot, train_aihub, val_aihub; gc.collect()
 
     print(f"train {len(train_data):,} tokens, val {len(val_data):,} tokens, vocab_size: {vocab_size}, device: {device}")
 

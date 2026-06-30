@@ -14,6 +14,7 @@ from bpe import decompose
 KORQUAD_DEV_URL   = "https://korquad.github.io/dataset/KorQuAD_v1.0_dev.json"
 KORQUAD_TRAIN_URL = "https://korquad.github.io/dataset/KorQuAD_v1.0_train.json"
 CHUNK_LEN = 180  # block_size=256 기준: 180자 ≈ 120토큰, 질문 길이 더해도 256 이하로 맞춰짐
+RAGDATA_DIR = Path(__file__).resolve().parent.parent.parent / "ragdata"
 
 
 def download_korquad_data(root_dir=None, force_download=False, include_train=False):
@@ -146,10 +147,25 @@ class TfidfRetriever:
         return [self.passages[i] for i in top_indices]
 
 
-def build_tfidf_retriever(root_dir=None):
-    pairs = load_korquad_qa_pairs(root_dir)
+def load_ragdata_passages(ragdata_dir=None, chunk_len=CHUNK_LEN):
+    """ragdata/ 폴더의 .txt/.md 파일을 읽어 chunk로 분할한 패시지 리스트를 반환."""
+    path = Path(ragdata_dir) if ragdata_dir else RAGDATA_DIR
+    if not path.exists():
+        return []
+    passages = []
+    for f in sorted(path.rglob("*")):
+        if f.suffix in (".txt", ".md") and f.is_file():
+            text = f.read_text(encoding="utf-8").strip()
+            if text:
+                passages.extend(chunk_context(text, chunk_len))
+    return passages
+
+
+def build_tfidf_retriever(root_dir=None, ragdata_dir=None):
+    pairs = load_korquad_qa_pairs(root_dir, include_train=True)
     contexts = {context for context, _, _, _ in pairs}
     passages = []
     for context in contexts:
         passages.extend(chunk_context(context))
+    passages.extend(load_ragdata_passages(ragdata_dir))
     return TfidfRetriever(passages)
