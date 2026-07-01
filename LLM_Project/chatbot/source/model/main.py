@@ -6,9 +6,10 @@ from pathlib import Path
 import torch
 
 from chat import chat, chat_qa, chat_span
-from model import device, steps, lr, SOP_GPT, SOP_GPT_Span, block_size
-from tokenizer import load_korean_chatbot_data, load_kowikitext_data, load_chatbot_qa_data, load_aihub_conversation_data
-from bpe import train_bpe, build_vocab, base_alphabet, encode, decode, save_bpe, load_bpe, tokenize_with_offsets
+from model import device, steps, lr, batch_size, SOP_GPT, SOP_GPT_Span, block_size
+from tokenizer import (load_korean_chatbot_data, load_kowikitext_data,
+                        load_chatbot_qa_data, load_chatbot_qa_pairs, load_aihub_conversation_data)
+from bpe import train_bpe, build_vocab, base_alphabet, encode, decode, save_bpe, load_bpe, tokenize_with_offsets, EOS_TOKEN
 from train_utils import make_batcher, train_loop, get_lr
 
 # rag/ 패키지와 langchain/ 디렉토리(서빙용 검색기)를 모듈 검색 경로에 추가한다.
@@ -31,15 +32,21 @@ GEN_CKPT = "SOP_GPT.pt"       # Stage 1(이어쓰기) 가중치
 QA_CKPT = "SOP_GPT_qa.pt"     # Stage 2(Q&A) 가중치
 SPAN_CKPT = "SOP_GPT_span.pt" # Stage 4(추출형 RAG QA) 가중치
 
-EARLY_STOP_PATIENCE = 10     # 연속 10번 평가(=200 step) 동안 개선이 없으면 중단
-EARLY_STOP_MIN_DELTA = 1e-3  # 이보다 작은 감소는 "개선 없음"으로 취급
+EARLY_STOP_PATIENCE = 10
+EARLY_STOP_MIN_DELTA = 1e-3
 
 FT_STEPS = 3000
-FT_LR = 3e-4                 # Stage 1보다 낮은 lr로 미세조정 (급격한 망각 방지)
+FT_LR = 3e-4
+FT_ACCUM_STEPS = 8           # batch_size=8 × accum=8 → 유효 배치 64
 
 SPAN_STEPS = 3000
 SPAN_LR = 3e-4
 SPAN_BATCH_SIZE = 32
+
+DPO_CKPT = "SOP_GPT_dpo.pt"
+DPO_STEPS = 1000
+DPO_LR = 1e-5                # SFT보다 훨씬 작은 lr (가중치 급변 방지)
+DPO_BETA = 0.1               # KL 페널티 강도 (0.1 = 표준값)
 
 if os.path.exists(BPE_PATH):
     vocab, merges = load_bpe(BPE_PATH)
@@ -94,27 +101,31 @@ def train_stage1(model):
     train_loop(model, get_batch, steps, lr, GEN_CKPT, EARLY_STOP_PATIENCE, EARLY_STOP_MIN_DELTA)
 
     model.eval()
-    prompt = torch.zeros((1, 1), dtype=torch.long, device=device)  # start token
-    # chat()과 동일한 생성 옵션을 줘야 "이상한 토큰 반복"이 아닌 의미 있는 샘플이 나온다.
+    prompt = torch.zeros((1, 1), dtype=torch.long, device=device)
+    eos_id = stoi.get(EOS_TOKEN)
     stop_tokens = {i for t, i in stoi.items() if t and t[-1] in ".?!"}
+    if eos_id is not None:
+        stop_tokens.add(eos_id)
     print("\n--- sample ---")
     print(decode(model.generate(prompt, 200, stop_tokens=stop_tokens, temperature=0.7, top_p=0.9, repetition_penalty=1.3)[0].tolist(), itos))
 
 
 def train_stage2(model):
+    # chatbot + KorQuAD 모두 EOS 포함 포맷으로 로드
     chatbot_text = load_chatbot_qa_data()
-    korquad_text = rag.load_korquad_qa_data()   # train+dev ~60K QA쌍 추가
+    korquad_text = rag.load_korquad_qa_data()
     text = chatbot_text + korquad_text
     data = torch.tensor(encode(text, merges, stoi, base_set), dtype=torch.long)
-    print(f"qa text: chatbot {len(chatbot_text):,} + korquad {len(korquad_text):,} chars"
-          f" = {len(text):,} chars, {len(data):,} tokens, vocab_size: {vocab_size}, device: {device}")
+    print(f"[stage2] chatbot {len(chatbot_text):,} + korquad {len(korquad_text):,} chars"
+          f" → {len(data):,} tokens (EOS 포함), vocab_size={vocab_size}, device={device}")
 
     n_train = int(0.9 * len(data))
     get_batch = make_batcher(data[:n_train], data[n_train:])
 
     model.load_state_dict(torch.load(GEN_CKPT, map_location=device))
-    print(f"loaded {GEN_CKPT}, fine-tuning on {len(data):,} QA tokens, device={device}")
-    train_loop(model, get_batch, FT_STEPS, FT_LR, QA_CKPT, EARLY_STOP_PATIENCE, EARLY_STOP_MIN_DELTA)
+    print(f"loaded {GEN_CKPT}, fine-tuning on {len(data):,} QA tokens")
+    train_loop(model, get_batch, FT_STEPS, FT_LR, QA_CKPT,
+               EARLY_STOP_PATIENCE, EARLY_STOP_MIN_DELTA, accum_steps=FT_ACCUM_STEPS)
 
 
 def _span_batch(examples, batch_size_n):
@@ -191,6 +202,18 @@ def train_stage4(model):
     print(f"saved best weights (val {best_val:.3f}) to {SPAN_CKPT}")
 
 
+def train_dpo(model):
+    """Stage 5: DPO로 선호 응답 학습. Stage 2 가중치에서 시작한다."""
+    from dpo import run_dpo
+    model.load_state_dict(torch.load(QA_CKPT, map_location=device))
+    print(f"[dpo] loaded {QA_CKPT} as policy init")
+    pairs = load_chatbot_qa_pairs()
+    korquad_pairs = [(q, a) for _, q, a, _ in rag.load_korquad_qa_pairs()]
+    all_pairs = pairs + korquad_pairs
+    run_dpo(model, all_pairs, stoi, itos, merges, base_set,
+            steps=DPO_STEPS, lr=DPO_LR, beta=DPO_BETA, ckpt_path=DPO_CKPT)
+
+
 def _chat_span(model):
     hybrid_retriever = build_hybrid_retriever()
     chat_span(model, stoi, merges, base_set, hybrid_retriever)
@@ -199,12 +222,13 @@ def _chat_span(model):
 SPAN_MODES = {"train_span", "chat_span"}
 
 MODES = {
-    "train": train_stage1,
-    "train_qa": train_stage2,
+    "train":      train_stage1,
+    "train_qa":   train_stage2,
     "train_span": train_stage4,
-    "chat": lambda model: chat(model, stoi, itos, merges, base_set),
-    "chat_qa": lambda model: chat_qa(model, stoi, itos, merges, base_set),
-    "chat_span": _chat_span,
+    "train_dpo":  train_dpo,
+    "chat":       lambda model: chat(model, stoi, itos, merges, base_set),
+    "chat_qa":    lambda model: chat_qa(model, stoi, itos, merges, base_set),
+    "chat_span":  _chat_span,
 }
 
 if __name__ == "__main__":

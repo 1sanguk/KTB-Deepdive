@@ -3,9 +3,14 @@ import re
 import unicodedata
 from collections import Counter, defaultdict
 
-# 텍스트를 "공백이 아닌 연속 구간" 또는 "공백 연속 구간"으로 분리한다.
-# 이렇게 쪼개두면 나중에 그냥 이어붙이기만 해도 원본 텍스트가 그대로 복원된다.
 WORD_RE = re.compile(r"\S+|\s+")
+
+# 특수 토큰 — BPE merge 없이 그대로 통과한다.
+EOS_TOKEN = "<|endoftext|>"
+USER_TOKEN = "<|user|>"
+ASSISTANT_TOKEN = "<|assistant|>"
+SPECIAL_TOKENS = (EOS_TOKEN, USER_TOKEN, ASSISTANT_TOKEN)
+_SPECIAL_RE = re.compile(r"(<\|[^|>]+\|>)")
 
 # base alphabet으로 쓸 문자 수. 코퍼스에서 가장 자주 등장하는 BASE_ALPHABET_SIZE개 문자만
 # base alphabet에 포함하고, 나머지 희귀 문자(한자/이모지 등)는 모두 UNK 하나로 합친다.
@@ -128,11 +133,16 @@ def _word_to_tokens(word, merges, base_set):
 
 
 def tokenize(text, merges, base_set):
-    """`text`를 자모 단위로 분해한 뒤 BPE 토큰(list[str])으로 변환한다."""
-    decomposed = decompose(text)
+    """`text`를 자모 단위로 분해한 뒤 BPE 토큰(list[str])으로 변환한다.
+    <|endoftext|> 등 특수 토큰은 BPE를 거치지 않고 그대로 통과한다."""
     tokens = []
-    for word in _split_words(decomposed):
-        tokens.extend(_word_to_tokens(word, merges, base_set))
+    for part in _SPECIAL_RE.split(text):
+        if part in SPECIAL_TOKENS:
+            tokens.append(part)
+        elif part:
+            decomposed = decompose(part)
+            for word in _split_words(decomposed):
+                tokens.extend(_word_to_tokens(word, merges, base_set))
     return tokens
 
 
@@ -163,8 +173,16 @@ def encode(text, merges, stoi, base_set):
 
 
 def decode(ids, itos):
-    """id 리스트 -> BPE 토큰 문자열 결합 -> NFC로 재조합한 텍스트."""
-    return compose("".join(itos[i] for i in ids))
+    """id 리스트 -> BPE 토큰 문자열 결합 -> NFC로 재조합한 텍스트.
+    EOS 토큰에서 디코딩을 멈추고, 다른 특수 토큰은 출력에서 제거한다."""
+    parts = []
+    for i in ids:
+        t = itos[i]
+        if t == EOS_TOKEN:
+            break
+        if t not in SPECIAL_TOKENS:
+            parts.append(t)
+    return compose("".join(parts))
 
 
 def save_bpe(path, vocab, merges):
@@ -175,8 +193,13 @@ def save_bpe(path, vocab, merges):
 
 
 def load_bpe(path):
-    """save_bpe로 저장한 JSON을 읽어 (vocab, merges)로 복원."""
+    """save_bpe로 저장한 JSON을 읽어 (vocab, merges)로 복원.
+    저장 당시 없던 특수 토큰을 vocab 끝에 자동으로 추가한다."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     merges = {(a, b): rank for rank, (a, b) in enumerate(data["merges"])}
-    return data["vocab"], merges
+    vocab = list(data["vocab"])
+    for tok in SPECIAL_TOKENS:
+        if tok not in vocab:
+            vocab.append(tok)
+    return vocab, merges

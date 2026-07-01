@@ -16,7 +16,7 @@ from pydantic import ConfigDict
 SOURCE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SOURCE_DIR / "model"))
 
-from bpe import tokenize, decode
+from bpe import tokenize, decode, EOS_TOKEN
 from model import device
 from chat import extract_answer as _extract_answer
 
@@ -47,6 +47,19 @@ class SOP_GPT_LLM(LLM):
     def _llm_type(self) -> str:
         return "sop_gpt"
 
+    def _stop_tokens(self) -> set:
+        """stop_on 설정에 따른 stop token id 집합을 반환. EOS 토큰은 항상 포함."""
+        if self.stop_on == "line":
+            ids = {i for t, i in self.stoi.items() if t.endswith("\n")}
+        elif self.stop_on == "sentence":
+            ids = {i for t, i in self.stoi.items() if t and t[-1] in ".?!"}
+        else:
+            ids = set()
+        eos_id = self.stoi.get(EOS_TOKEN)
+        if eos_id is not None:
+            ids.add(eos_id)
+        return ids or None
+
     def _call(
         self,
         prompt: str,
@@ -54,12 +67,7 @@ class SOP_GPT_LLM(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        if self.stop_on == "line":
-            stop_tokens = {i for t, i in self.stoi.items() if t.endswith("\n")}
-        elif self.stop_on == "sentence":
-            stop_tokens = {i for t, i in self.stoi.items() if t and t[-1] in ".?!"}
-        else:
-            stop_tokens = None
+        stop_tokens = self._stop_tokens()
 
         ids = [self.stoi[t] for t in tokenize(prompt, self.merges, self.base_set) if t in self.stoi]
         if not ids:
@@ -74,6 +82,26 @@ class SOP_GPT_LLM(LLM):
             repetition_penalty=self.repetition_penalty,
         )[0].tolist()
         return decode(out[len(ids):], self.itos).strip()
+
+    def stream_tokens(self, prompt: str):
+        """토큰 생성마다 현재까지 디코딩된 전체 텍스트를 yield하는 동기 제너레이터."""
+        stop_tokens = self._stop_tokens()
+
+        ids = [self.stoi[t] for t in tokenize(prompt, self.merges, self.base_set) if t in self.stoi]
+        if not ids:
+            ids = [0]
+        idx = torch.tensor([ids], dtype=torch.long, device=device)
+        generated: list[int] = []
+        for token_id in self.torch_model.generate_stream(
+            idx, self.max_new_tokens,
+            stop_tokens=stop_tokens,
+            temperature=self.temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            repetition_penalty=self.repetition_penalty,
+        ):
+            generated.append(token_id)
+            yield decode(generated, self.itos).strip()
 
 
 def make_span_extractor(span_model, stoi, merges, base_set) -> Callable[[dict], str]:

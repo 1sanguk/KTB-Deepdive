@@ -37,10 +37,10 @@ def load_korean_chatbot_data(root_dir=None):
     return "\n".join(q + "\t" + a for q, a in zip(questions, answers))
 
 
-def load_chatbot_qa_data(root_dir=None):
-    """Q&A 쌍을 "질문: ...\\n답변: ...\\n\\n" 포맷으로 만들어 합친다 (Stage 2 fine-tuning용)."""
+def load_chatbot_qa_pairs(root_dir=None):
+    """(question, answer) 튜플 리스트를 반환 (Stage 2 / DPO 학습 공용)."""
     local_path = download_korean_chatbot_data(root_dir)
-    chunks = []
+    pairs = []
     with open(local_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         next(reader, None)
@@ -48,30 +48,58 @@ def load_chatbot_qa_data(root_dir=None):
             if len(row) != 3:
                 continue
             question, answer, _label = row
-            chunks.append(f"질문: {question}\n답변: {answer}\n\n")
-    return "".join(chunks)
+            if question.strip() and answer.strip():
+                pairs.append((question.strip(), answer.strip()))
+    return pairs
+
+
+def load_chatbot_qa_data(root_dir=None):
+    """Q&A 쌍을 "질문: ...\\n답변: ...<|endoftext|>\\n" 포맷으로 반환 (Stage 2 fine-tuning용)."""
+    from bpe import EOS_TOKEN
+    return "".join(
+        f"질문: {q}\n답변: {a}{EOS_TOKEN}\n"
+        for q, a in load_chatbot_qa_pairs(root_dir)
+    )
 
 
 AIHUB_DIR = Path.home() / "Korpora" / "aihub"
 
 
+_NOISE_RE = re.compile(r'^[\s\d\W]+$')  # 숫자·특수문자·공백만 있는 줄
+
+
+def _clean_utterance(line: str) -> str:
+    """발화 텍스트를 정제한다. 너무 짧거나 노이즈인 줄은 빈 문자열로 반환."""
+    line = line.strip()
+    if len(line) < 5:
+        return ""
+    if _NOISE_RE.match(line):
+        return ""
+    # 중복 공백 정리
+    return re.sub(r' {2,}', ' ', line)
+
+
 def _read_txt_conversation(text: str) -> str:
     """'화자번호 : 발화' 형식의 txt를 대화 텍스트로 변환."""
-    lines = []
+    seen, lines = set(), []
     for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # "1 : 안녕하세요" → "안녕하세요"
-        m = re.match(r'^\d+\s*:\s*(.+)', line)
-        lines.append(m.group(1) if m else line)
+        m = re.match(r'^\d+\s*:\s*(.+)', line.strip())
+        utt = _clean_utterance(m.group(1) if m else line)
+        if utt and utt not in seen:
+            seen.add(utt)
+            lines.append(utt)
     return "\n".join(lines)
 
 
 def _read_json_conversation(data: dict) -> str:
     """AI Hub JSON 형식에서 body[].utterance를 추출해 대화 텍스트로 변환."""
     body = data.get("body", [])
-    lines = [entry.get("utterance", "").strip() for entry in body if entry.get("utterance", "").strip()]
+    seen, lines = set(), []
+    for entry in body:
+        utt = _clean_utterance(entry.get("utterance", ""))
+        if utt and utt not in seen:
+            seen.add(utt)
+            lines.append(utt)
     return "\n".join(lines)
 
 

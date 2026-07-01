@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-01 — Claude API 연동 + 스트리밍 + 분할화면 UI + app.py 모듈화 + RPG 문서](#2026-07-01--claude-api-연동--스트리밍--분할화면-ui--apppy-모듈화--rpg-문서)
 - [2026-06-30 — AI Hub 대화 데이터 추가 + RAG 확장](#2026-06-30--ai-hub-대화-데이터-추가--rag-확장)
 - [2026-06-28 — 모델 확장 재학습 + LangSmith 트레이싱 (3번 과제)](#2026-06-28--모델-확장-재학습--langsmith-트레이싱-3번-과제)
 - [2026-06-27 — LangChain 전체 파이프라인 마이그레이션 (1번·2번 과제 완료)](#2026-06-27--langchain-전체-파이프라인-마이그레이션-1번2번-과제-완료)
@@ -9,6 +10,97 @@
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
 - [회고](#회고)
+
+---
+
+## 2026-07-01 — Claude API 연동 + 스트리밍 + 분할화면 UI + app.py 모듈화 + RPG 문서
+
+### `/chat/langchain` segfault 수정
+
+- `app.py` 최상단에 `os.environ["TOKENIZERS_PARALLELISM"] = "false"` + `OMP_NUM_THREADS = "1"` 추가
+- 원인: uvicorn 요청 처리 중 FAISS가 쿼리 임베딩 시 HuggingFace 토크나이저가 멀티프로세싱 세마포어를 잘못 처리 → segfault
+- 환경변수로 병렬 토크나이저를 비활성화해 해결. `/chat/basic`, `/chat/rag`는 정상이었으나 `/chat/langchain`만 임베딩 추론을 실시간으로 호출하는 구조였기 때문
+
+### QA LLM 생성 파라미터 조정
+
+| 파라미터 | 변경 전 | 변경 후 | 이유 |
+|---|---|---|---|
+| `stop_on` | `"line"` | `"sentence"` | `\n` 대신 `.?!`에서 멈춤 — 학습 데이터 포맷의 `질문:` 반복을 방지 |
+| `temperature` | 0.8 | 0.7 | 더 일관성 있는 출력 |
+| `top_p` | 없음 | 0.9 | nucleus sampling 추가 |
+| `max_new_tokens` | 60 | 250 | 더 긴 답변 허용 |
+
+`stop_on="none"`으로 설정하면 모델이 학습 데이터 포맷(`"질문: ...\n답변: ..."`)을 무한 반복 생성하는 현상을 확인. `"sentence"`가 실용적 최적값.
+
+### Claude API 연동 (`source/lc/claude_llm.py` 신설)
+
+- `claude-haiku-4-5-20251001` 모델 사용 (가장 저렴하고 빠른 티어, $0.80/1M input)
+- `ask_claude(question)`: RAG 없이 Claude가 직접 답변
+- `ask_claude_with_context(question, context)`: 검색된 문서를 참고해 Claude가 답변
+- `stream_claude(question, context="")`: 비동기 스트리밍 제너레이터 (매 yield마다 누적 텍스트)
+- `build_claude_rag_chain(retriever, threshold)`: 기존 retriever 재사용, 점수에 따라 컨텍스트 제공 여부 결정
+- Claude 엔드포인트 3개 추가: `POST /chat/claude/basic`, `/chat/claude/rag`, `/chat/claude/langchain`
+
+### 분할화면 UI 개편
+
+- 기존: 홈 화면에 SOP 카드 3개 + Claude 카드 3개 총 6개
+- 변경: 홈 화면에 카드 3개만 (모드 선택), 입장 후 좌/우 분할화면
+  - 왼쪽: SOP_GPT 응답
+  - 오른쪽: Claude (Haiku) 응답
+- `.app` 최대 너비 760px → 1100px로 확장
+- 메시지 전송 시 두 패널이 독립적으로 각자 요청을 시작, 먼저 끝난 쪽이 먼저 표시됨
+
+### SSE 스트리밍 구현
+
+**`source/model/model.py`** — `SOP_GPT.generate_stream()` 추가:
+- 기존 `generate()`와 동일한 로직이지만 매 토큰 생성마다 `yield next_id.item()`
+
+**`source/lc/llm.py`** — `SOP_GPT_LLM.stream_tokens()` 추가:
+- 동기 제너레이터. 토큰을 생성할 때마다 `decode(accumulated_ids, itos).strip()`으로 현재까지 디코딩된 전체 텍스트를 yield
+- BPE NFD 특성상 토큰 하나씩 delta를 보내면 부분 한글이 깨질 수 있어, 전체 누적 텍스트를 yield하는 방식 선택
+
+**`source/app/app.py`** — SOP 스트리밍 3개 + Claude 스트리밍 3개 엔드포인트 추가:
+- `POST /chat/{basic|rag|langchain}/stream`
+- `POST /chat/claude/{basic|rag|langchain}/stream`
+- SSE 포맷: `data: {"type": "text"|"rag_context"|"done", "text": "..."}` 형식
+- `_sop_stream()`: 동기 제너레이터를 `threading.Thread` + `queue.Queue` + `asyncio.run_in_executor()`로 감싸 비동기 FastAPI에서 논블로킹으로 실행
+- RAG 모드는 검색 결과를 먼저 `rag_context` 이벤트로 보낸 뒤 답변 스트리밍
+
+**프론트엔드 JS**:
+- `Promise.allSettled()` 방식 → 각 패널별 독립 `fetch` + `ReadableStream` 파서로 교체
+- `streamPanelWith()`: SSE 청크를 버퍼링해서 `\n\n` 기준으로 파싱, `evt.type`에 따라 텍스트 업데이트 또는 RAG 라벨 추가
+- `pendingCount` 카운터로 두 패널 모두 완료 시 전송 버튼 재활성화
+
+### `source/app/app.py` 622줄 → 모듈 분리
+
+단일 파일이었던 `app.py`를 역할별로 6개 파일로 분리. 기능은 동일하게 유지.
+
+| 파일 | 역할 |
+|---|---|
+| `app.py` | FastAPI 선언 + 라우터 등록 (30줄로 축소) |
+| `state.py` | 모델·LLM·체인·검색기 초기화 (import 시점 1회 실행) |
+| `models.py` | Pydantic 스키마 4개 |
+| `streaming.py` | SSE 헬퍼 (`_sse`, `sop_stream`, `sop_rag_stream`, `claude_rag_stream`) |
+| `ui.py` | `GET /` 엔드포인트 + 전체 HTML 문자열 |
+| `routers/chat.py` | non-streaming 엔드포인트 7개 |
+| `routers/stream.py` | SSE 스트리밍 엔드포인트 6개 |
+
+**sys.path 순서 의존성**: `app.py`가 먼저 `sys.path.insert()`를 실행하고 나서 `import state`를 해야 한다. `routers/*.py`도 `state`를 import하지만 이 시점에는 이미 path가 등록되어 있다.
+
+### `ragdata/rpg.md` 추가
+
+- RPG(롤플레잉 게임) 한국어 설명 문서 신설 (자체 작성, GitHub 공개 가능)
+- 포함 섹션: RPG 정의·특징·종류(JRPG/ARPG/MMORPG/TRPG/로그라이크/오픈월드)·역사·주요 용어·한국 RPG 문화
+- `ragdata/.gitkeep` 삭제, 서버 재기동 시 `load_ragdata_passages()`가 자동으로 TF-IDF + LangChain 인덱스에 포함
+- `.cache/` 전체 삭제 → 다음 기동 시 새 문서 포함해 재빌드
+
+### README.md · basicdata/info.md 이미지 삽입
+
+| 이미지 | 삽입 위치 |
+|---|---|
+| `images/basic_gpt.png` | README `## 개요` 아래 / info.md `source/app/` 섹션 시작부 |
+| `images/rag_gpt.png` | README `## RAG 아키텍처` 아래 / info.md `TfidfRetriever` 설명 앞 |
+| `images/langchain_gpt.png` | README `## LangChain 파이프라인 구조` 아래 / info.md `retriever.py` 섹션 시작부 |
 
 ---
 

@@ -3,6 +3,17 @@ import torch
 
 from model import block_size, batch_size, device
 
+# bf16 autocast: CUDA와 MPS(Apple Silicon) 모두 지원
+_AMP_ENABLED = device in ("cuda", "mps")
+_AMP_DTYPE = torch.bfloat16
+
+if _AMP_ENABLED:
+    print(f"[train_utils] bf16 autocast 활성화 (device={device})")
+
+
+def _autocast():
+    return torch.autocast(device_type=device, dtype=_AMP_DTYPE, enabled=_AMP_ENABLED)
+
 
 def make_batcher(train_data, val_data):
     """train_data/val_data(1D LongTensor)에서 (x, y) 배치를 뽑는 get_batch 함수를 만든다."""
@@ -19,8 +30,15 @@ def make_batcher(train_data, val_data):
 def estimate_loss(model, get_batch):
     """Average loss over several batches, with dropout off."""
     model.eval()
-    out = {s: sum(model(*get_batch(s))[1].item() for _ in range(20)) / 20
-           for s in ("train", "val")}
+    out = {}
+    for s in ("train", "val"):
+        total = 0
+        for _ in range(20):
+            x, y = get_batch(s)
+            with _autocast():
+                _, loss = model(x, y)
+            total += loss.item()
+        out[s] = total / 20
     model.train()
     return out
 
@@ -58,11 +76,12 @@ def train_loop(model, get_batch, steps, lr, ckpt_path, patience, min_delta,
         for pg in opt.param_groups:
             pg["lr"] = cur_lr
 
-        # gradient accumulation: 소배치 여러 번 backward한 뒤 optimizer step 한 번
+        # gradient accumulation + bf16 autocast
         opt.zero_grad()
         for _ in range(accum_steps):
             x, y = get_batch()
-            _, loss = model(x, y)
+            with _autocast():
+                _, loss = model(x, y)
             (loss / accum_steps).backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
         opt.step()

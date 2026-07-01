@@ -4,10 +4,10 @@ import torch.nn.functional as F
 
 # --- hyperparameters ---
 block_size = 256     # max context length
-n_embd = 512         # embedding dimension
-n_head = 8           # attention heads
-n_layer = 12          # transformer blocks
-batch_size = 16   # gradient accumulation으로 유효 배치 크기(64)를 유지 — 활성화 메모리 4x 절감
+n_embd = 768         # embedding dimension (512→768, ~97M params)
+n_head = 12          # attention heads (head_dim=64 유지)
+n_layer = 12         # transformer blocks
+batch_size = 8    # 768-dim은 메모리를 더 씀 — accum_steps=8로 유효 배치 64 유지
 steps = 20000
 lr = 1e-3
 dropout = 0.2
@@ -18,33 +18,49 @@ device = (
 )
 torch.manual_seed(1337)
 
+
 class CausalSelfAttention(nn.Module):
-    """Multi-head scaled dot-product attention: softmax(QK^T / sqrt(d) + mask) V."""
+    """Multi-head scaled dot-product attention with optional KV cache.
+
+    past_kv: (past_k, past_v) tensors from the previous step, or None.
+    Returns (output, (k_full, v_full)) so callers can cache and reuse K/V.
+    """
 
     def __init__(self):
         super().__init__()
-        self.qkv = nn.Linear(n_embd, 3 * n_embd)   # project x to Q, K, V at once
-        self.proj = nn.Linear(n_embd, n_embd)      # merge heads back together
+        self.qkv = nn.Linear(n_embd, 3 * n_embd)
+        self.proj = nn.Linear(n_embd, n_embd)
         self.drop = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, past_kv=None):
         B, T, C = x.shape
         head_dim = C // n_head
-        
-        # each of q, k, v: (B, T, C) -> (B, n_head, T, head_dim)
+
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q = q.view(B, T, n_head, head_dim).transpose(1, 2)
         k = k.view(B, T, n_head, head_dim).transpose(1, 2)
         v = v.view(B, T, n_head, head_dim).transpose(1, 2)
 
-        # attention scores: how much each position attends to every earlier one
-        att = q @ k.transpose(-2, -1) / head_dim**0.5        # (B, n_head, T, T)
-        causal = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
-        att = att.masked_fill(~causal, float("-inf"))        # no peeking at the future
-        att = self.drop(F.softmax(att, dim=-1))
-        out = att @ v                                        # (B, n_head, T, head_dim)
-        out = out.transpose(1, 2).reshape(B, T, C)           # concat heads
-        return self.drop(self.proj(out))
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+
+        T_kv = k.shape[2]
+        att = q @ k.transpose(-2, -1) / head_dim ** 0.5  # (B, n_head, T, T_kv)
+
+        if T > 1:
+            # q position i (global) = T_kv - T + i, so it may attend to k positions 0..T_kv-T+i
+            q_start = T_kv - T
+            causal = torch.tril(torch.ones(T_kv, T_kv, dtype=torch.bool, device=x.device))[q_start:]
+            att = att.masked_fill(~causal, float("-inf"))
+        # T == 1: single new token may attend to all cached keys — no mask needed
+
+        # softmax in fp32 for numerical stability, then cast back
+        att = self.drop(F.softmax(att.float(), dim=-1).to(x.dtype))
+        out = (att @ v).transpose(1, 2).reshape(B, T, C)
+        return self.drop(self.proj(out)), (k, v)
+
 
 class Block(nn.Module):
     """Transformer decoder block: causal self-attention + feed-forward."""
@@ -61,10 +77,29 @@ class Block(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x, past_kv=None):
+        attn_out, present_kv = self.attn(self.ln1(x), past_kv)
+        x = x + attn_out
         x = x + self.mlp(self.ln2(x))
-        return x
+        return x, present_kv
+
+
+def _sample_logits(logits, temperature, top_k, top_p, repetition_ids):
+    """공통 샘플링 로직. logits: (1, vocab) float32."""
+    logits = logits / temperature
+    if repetition_ids is not None:
+        for tid in repetition_ids:
+            logits[0, tid] = logits[0, tid] / 1.3 if logits[0, tid] > 0 else logits[0, tid] * 1.3
+    if top_k is not None:
+        kth = torch.topk(logits, top_k).values[:, -1:]
+        logits[logits < kth] = float("-inf")
+    if top_p is not None:
+        sl, si = torch.sort(logits, descending=True, dim=-1)
+        cp = torch.cumsum(F.softmax(sl, dim=-1), dim=-1)
+        sl[cp - F.softmax(sl, dim=-1) > top_p] = float("-inf")
+        logits = torch.full_like(logits, float("-inf")).scatter(-1, si, sl)
+    return torch.multinomial(F.softmax(logits, dim=-1), 1)
+
 
 class SOP_GPT(nn.Module):
     def __init__(self, vocab_size):
@@ -72,50 +107,89 @@ class SOP_GPT(nn.Module):
         self.vocab_size = vocab_size
         self.tok_emb = nn.Embedding(vocab_size, n_embd)
         self.pos_emb = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block() for _ in range(n_layer)])
+        self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd)
         self.head = nn.Linear(n_embd, vocab_size, bias=False)
-        self.head.weight = self.tok_emb.weight  # weight tying: 파라미터 절약 + 임베딩-출력 일관성
+        self.head.weight = self.tok_emb.weight  # weight tying
 
     def forward(self, idx, targets=None):
         T = idx.shape[1]
         x = self.tok_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device))
-        x = self.ln_f(self.blocks(x))
+        for block in self.blocks:
+            x, _ = block(x)  # past_kv=None during training
+        x = self.ln_f(x)
         logits = self.head(x)
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
         return logits, loss
 
+    def _forward_with_cache(self, ctx, positions, past_kvs):
+        """KV cache를 사용하는 단일 forward pass. (x, new_kvs) 반환."""
+        x = self.tok_emb(ctx) + self.pos_emb(positions)
+        new_kvs = []
+        for i, block in enumerate(self.blocks):
+            x, kv = block(x, past_kvs[i] if past_kvs is not None else None)
+            new_kvs.append(kv)
+        return self.ln_f(x), new_kvs
+
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, stop_tokens=None, temperature=1.0, top_k=None, top_p=None, repetition_penalty=1.0):
+    def generate(self, idx, max_new_tokens, stop_tokens=None, temperature=1.0,
+                 top_k=None, top_p=None, repetition_penalty=1.0):
+        past_kvs = None
         for _ in range(max_new_tokens):
-            logits, _ = self(idx[:, -block_size:])
-            logits = logits[:, -1, :] / temperature
-            if repetition_penalty != 1.0:
-                # 직전 block_size 토큰 안에서 이미 나온 토큰의 logit을 깎아 반복(루프)을 줄인다.
-                for token_id in set(idx[0, -block_size:].tolist()):
-                    if logits[0, token_id] > 0:
-                        logits[0, token_id] /= repetition_penalty
-                    else:
-                        logits[0, token_id] *= repetition_penalty
-            if top_k is not None:
-                # top_k보다 확률이 낮은 토큰은 후보에서 제외 (이상한 토큰이 뽑힐 확률을 줄임)
-                kth_value = torch.topk(logits, top_k).values[:, -1:]
-                logits[logits < kth_value] = float("-inf")
-            if top_p is not None:
-                # 누적 확률이 top_p를 넘는 지점부터의 토큰(꼬리, 즉 불필요하게 이상한 토큰)을 후보에서 제외
-                sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
-                cum_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                sorted_mask = cum_probs - F.softmax(sorted_logits, dim=-1) > top_p  # 첫 토큰은 항상 남김
-                sorted_logits[sorted_mask] = float("-inf")
-                logits = torch.full_like(logits, float("-inf")).scatter(-1, sorted_idx, sorted_logits)
-            probs = F.softmax(logits, dim=-1)
-            next_id = torch.multinomial(probs, 1)
+            if past_kvs is None:
+                ctx = idx[:, -block_size:]
+                positions = torch.arange(ctx.shape[1], device=idx.device)
+            else:
+                cache_len = past_kvs[0][0].shape[2]
+                if cache_len >= block_size:
+                    # 캐시가 꽉 찼으면 리셋 후 전체 재계산
+                    past_kvs = None
+                    ctx = idx[:, -block_size:]
+                    positions = torch.arange(ctx.shape[1], device=idx.device)
+                else:
+                    ctx = idx[:, -1:]
+                    positions = torch.tensor([cache_len], device=idx.device)
+
+            x, past_kvs = self._forward_with_cache(ctx, positions, past_kvs)
+            logits = self.head(x)[:, -1, :].float()
+
+            rep_ids = set(idx[0, -block_size:].tolist()) if repetition_penalty != 1.0 else None
+            next_id = _sample_logits(logits, temperature, top_k, top_p, rep_ids)
             idx = torch.cat([idx, next_id], dim=1)
             if stop_tokens is not None and next_id.item() in stop_tokens:
                 break
         return idx
+
+    @torch.no_grad()
+    def generate_stream(self, idx, max_new_tokens, stop_tokens=None, temperature=1.0,
+                        top_k=None, top_p=None, repetition_penalty=1.0):
+        """토큰을 하나씩 yield하는 스트리밍 버전 (KV cache 적용)."""
+        past_kvs = None
+        for _ in range(max_new_tokens):
+            if past_kvs is None:
+                ctx = idx[:, -block_size:]
+                positions = torch.arange(ctx.shape[1], device=idx.device)
+            else:
+                cache_len = past_kvs[0][0].shape[2]
+                if cache_len >= block_size:
+                    past_kvs = None
+                    ctx = idx[:, -block_size:]
+                    positions = torch.arange(ctx.shape[1], device=idx.device)
+                else:
+                    ctx = idx[:, -1:]
+                    positions = torch.tensor([cache_len], device=idx.device)
+
+            x, past_kvs = self._forward_with_cache(ctx, positions, past_kvs)
+            logits = self.head(x)[:, -1, :].float()
+
+            rep_ids = set(idx[0, -block_size:].tolist()) if repetition_penalty != 1.0 else None
+            next_id = _sample_logits(logits, temperature, top_k, top_p, rep_ids)
+            idx = torch.cat([idx, next_id], dim=1)
+            yield next_id.item()
+            if stop_tokens is not None and next_id.item() in stop_tokens:
+                break
 
 
 class SOP_GPT_Span(nn.Module):
@@ -128,7 +202,7 @@ class SOP_GPT_Span(nn.Module):
         self.vocab_size = vocab_size
         self.tok_emb = nn.Embedding(vocab_size, n_embd)
         self.pos_emb = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block() for _ in range(n_layer)])
+        self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd)
         self.qa_head = nn.Linear(n_embd, 2)  # 위치별 (start_logit, end_logit)
 
@@ -143,7 +217,9 @@ class SOP_GPT_Span(nn.Module):
     def forward(self, idx, start_targets=None, end_targets=None):
         T = idx.shape[1]
         x = self.tok_emb(idx) + self.pos_emb(torch.arange(T, device=idx.device))
-        x = self.ln_f(self.blocks(x))
+        for block in self.blocks:
+            x, _ = block(x)  # KV cache 불필요 (분류 태스크)
+        x = self.ln_f(x)
         logits = self.qa_head(x)  # (B, T, 2)
         start_logits, end_logits = logits[..., 0], logits[..., 1]
         loss = None

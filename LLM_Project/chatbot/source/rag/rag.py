@@ -68,10 +68,11 @@ def load_korquad_qa_pairs(root_dir=None, include_train=False):
 
 
 def load_korquad_qa_data(root_dir=None):
-    """KorQuAD v1.0 train+dev -> "질문: ...\\n답변: ...\\n\\n" 포맷 문자열 (Stage 2 fine-tuning용)."""
+    """KorQuAD v1.0 train+dev -> "질문: ...\\n답변: ...<EOS>\\n" 포맷 문자열 (Stage 2 fine-tuning용)."""
+    from bpe import EOS_TOKEN
     pairs = load_korquad_qa_pairs(root_dir, include_train=True)
     print(f"KorQuAD QA pairs loaded: {len(pairs):,}")
-    return "".join(f"질문: {q}\n답변: {a}\n\n" for _, q, a, _ in pairs)
+    return "".join(f"질문: {q}\n답변: {a}{EOS_TOKEN}\n" for _, q, a, _ in pairs)
 
 
 def chunk_context(context, chunk_len=CHUNK_LEN):
