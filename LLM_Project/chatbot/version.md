@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장](#2026-06-29--bf16--kv-cache--cross-encoder-재정렬--dpo--langgraph--rpg-문서-확장)
 - [2026-07-01 — Claude API 연동 + 스트리밍 + 분할화면 UI + app.py 모듈화 + RPG 문서](#2026-07-01--claude-api-연동--스트리밍--분할화면-ui--apppy-모듈화--rpg-문서)
 - [2026-06-30 — AI Hub 대화 데이터 추가 + RAG 확장](#2026-06-30--ai-hub-대화-데이터-추가--rag-확장)
 - [2026-06-28 — 모델 확장 재학습 + LangSmith 트레이싱 (3번 과제)](#2026-06-28--모델-확장-재학습--langsmith-트레이싱-3번-과제)
@@ -10,6 +11,69 @@
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
 - [회고](#회고)
+
+---
+
+## 2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장
+
+### bf16 혼합 정밀도 학습 (`source/model/train_utils.py`)
+
+- `torch.autocast(device_type="mps", dtype=torch.bfloat16)` 적용 — M2 Pro는 bf16 네이티브 지원
+- `_AMP_ENABLED = device in ("cuda", "mps")`, `_AMP_DTYPE = torch.bfloat16` 로 활성화 여부를 디바이스 조건으로 결정
+- `_autocast()` 헬퍼를 통해 `train_loop()` 내 gradient accumulation 구간과 `estimate_loss()` 양쪽 모두 적용
+- GradScaler 없이 동작 (bf16 + MPS 조합은 GradScaler 불필요)
+- 기동 시 로그 출력: `[train_utils] bf16 autocast 활성화 (device=mps)`
+
+### KV Cache 추론 최적화 (`source/model/model.py`)
+
+- **`nn.Sequential` → `nn.ModuleList`**: `past_kv` 인자를 각 블록에 순서대로 넘기려면 인덱싱이 필요해 변경. state_dict 키(`blocks.0.`, `blocks.1.`, …)는 동일해 기존 체크포인트와 호환됨
+- **`CausalSelfAttention.forward(past_kv)`**: KV 캐시 슬롯 추가. `past_kv`가 있으면 이전 K/V를 concat해 전체 히스토리 attention을 수행. 반환값이 `(out, (k, v))`로 변경됨
+- **`Block.forward(past_kv)`**: Attention의 `present_kv`를 받아 상위로 전달
+- **`_forward_with_cache(ctx, positions, past_kvs)`**: 각 블록에 레이어별 KV 캐시를 넘기고 새 KV를 수집해 반환하는 내부 메서드
+- **`generate()` 캐시 루프**:
+  - 첫 스텝: 전체 컨텍스트를 한 번에 prefill, `past_kvs` 초기화
+  - 이후 스텝: `ctx = idx[:, -1:]` (마지막 토큰 1개만), positions = cache 길이로 이동
+  - `cache_len >= block_size` 도달 시 캐시 초기화 후 재prefill — OOM 방지
+
+### Cross-Encoder 재정렬 (`source/lc/retriever.py`)
+
+- `bongsoo/klue-cross-encoder-v1` 모델 로드 (`sentence_transformers.CrossEncoder`)
+- `best_match()` 로직 변경: hybrid 점수 상위 10개(`RERANK_TOP_K`) 후보를 Cross-Encoder로 재정렬해 가장 적합한 청크를 반환
+- routing 임계값(`score >= 0.515`) 판단에는 calibrated hybrid 점수를 그대로 유지 — Cross-Encoder 점수로 최적 청크만 교체하고 점수 스케일은 변경하지 않아 임계값 재보정 불필요
+- `.cache/` 전체 삭제 → 다음 서버 기동 시 새 ragdata 포함해 재빌드
+
+### DPO 학습 단계 추가 (`train_all.sh`, `source/model/main.py`)
+
+- `train_all.sh`에 **Stage 5 (train_dpo)** 추가: Stage 4 완료 후 DPO 선호 학습 자동 실행
+- DPO(Direct Preference Optimization): 정답 응답(chosen)과 오답 응답(rejected)의 확률 비를 최대화하는 방식으로 모델이 선호하는 응답 방향을 조정
+  - rejected 쌍은 배치 내 circular-shift로 생성
+  - `loss = -log σ(β*(log π_chosen - log π_rejected - log π_ref_chosen + log π_ref_rejected))`
+- Stage 1 → 2 → 4 → 5 순서로 자동 실행 (진행 중)
+
+### LangGraph 파이프라인 구조 (`source/lg/`)
+
+- **`state.py`**: `GraphState` TypedDict 정의 — `query`, `documents`, `score`, `answer`, `used_rag`, `retry_count`
+- **`nodes.py`**: 노드 팩토리 4개 구현
+  - `make_retriever_node(retriever)`: hybrid 검색 → `documents`, `score` 갱신
+  - `make_grade_node(threshold)`: 점수 비교 → `used_rag` 결정
+  - `make_generate_span_node(span_extractor_fn)`: Span 추출형 답변 생성
+  - `make_generate_direct_node(qa_llm)`: QA LLM 직접 생성 (RAG 미사용 폴백)
+- **`graph.py`**: 사용자가 직접 작성 중. `build_graph(retriever, qa_llm, span_extractor_fn, threshold=0.515)` 함수와 `_route(state)` 라우팅 함수 포함 예정
+
+### RPG ragdata 확장 (`ragdata/`)
+
+기존 `rpg.md` 하나에서 장르별 6개 파일로 세분화:
+
+| 파일 | 내용 |
+|---|---|
+| `rpg_jrpg.md` | JRPG 장르 (FF, DQ, Chrono Trigger 등) |
+| `rpg_mmorpg.md` | MMORPG (WoW, FFXIV, 리니지, 로스트아크 등) |
+| `rpg_mechanics.md` | RPG 공통 시스템 (레벨, 스킬, 아이템, 전투) |
+| `rpg_trpg.md` | TRPG·D&D 규칙, 직업, 주사위 시스템 |
+| `rpg_arpg.md` | ARPG (다크소울, 디아블로, 위처 등) |
+| `rpg_korean_games.md` | 한국 RPG 역사 및 대표작 |
+
+문서 확장으로 RAG 검색 인덱스의 RPG 도메인 커버리지가 크게 향상됨.
 
 ---
 
