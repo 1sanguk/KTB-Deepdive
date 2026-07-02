@@ -2,78 +2,15 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
-- [2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장](#2026-06-29--bf16--kv-cache--cross-encoder-재정렬--dpo--langgraph--rpg-문서-확장)
 - [2026-07-01 — Claude API 연동 + 스트리밍 + 분할화면 UI + app.py 모듈화 + RPG 문서](#2026-07-01--claude-api-연동--스트리밍--분할화면-ui--apppy-모듈화--rpg-문서)
 - [2026-06-30 — AI Hub 대화 데이터 추가 + RAG 확장](#2026-06-30--ai-hub-대화-데이터-추가--rag-확장)
+- [2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장](#2026-06-29--bf16--kv-cache--cross-encoder-재정렬--dpo--langgraph--rpg-문서-확장)
 - [2026-06-28 — 모델 확장 재학습 + LangSmith 트레이싱 (3번 과제)](#2026-06-28--모델-확장-재학습--langsmith-트레이싱-3번-과제)
 - [2026-06-27 — LangChain 전체 파이프라인 마이그레이션 (1번·2번 과제 완료)](#2026-06-27--langchain-전체-파이프라인-마이그레이션-1번2번-과제-완료)
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
 - [회고](#회고)
-
----
-
-## 2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장
-
-### bf16 혼합 정밀도 학습 (`source/model/train_utils.py`)
-
-- `torch.autocast(device_type="mps", dtype=torch.bfloat16)` 적용 — M2 Pro는 bf16 네이티브 지원
-- `_AMP_ENABLED = device in ("cuda", "mps")`, `_AMP_DTYPE = torch.bfloat16` 로 활성화 여부를 디바이스 조건으로 결정
-- `_autocast()` 헬퍼를 통해 `train_loop()` 내 gradient accumulation 구간과 `estimate_loss()` 양쪽 모두 적용
-- GradScaler 없이 동작 (bf16 + MPS 조합은 GradScaler 불필요)
-- 기동 시 로그 출력: `[train_utils] bf16 autocast 활성화 (device=mps)`
-
-### KV Cache 추론 최적화 (`source/model/model.py`)
-
-- **`nn.Sequential` → `nn.ModuleList`**: `past_kv` 인자를 각 블록에 순서대로 넘기려면 인덱싱이 필요해 변경. state_dict 키(`blocks.0.`, `blocks.1.`, …)는 동일해 기존 체크포인트와 호환됨
-- **`CausalSelfAttention.forward(past_kv)`**: KV 캐시 슬롯 추가. `past_kv`가 있으면 이전 K/V를 concat해 전체 히스토리 attention을 수행. 반환값이 `(out, (k, v))`로 변경됨
-- **`Block.forward(past_kv)`**: Attention의 `present_kv`를 받아 상위로 전달
-- **`_forward_with_cache(ctx, positions, past_kvs)`**: 각 블록에 레이어별 KV 캐시를 넘기고 새 KV를 수집해 반환하는 내부 메서드
-- **`generate()` 캐시 루프**:
-  - 첫 스텝: 전체 컨텍스트를 한 번에 prefill, `past_kvs` 초기화
-  - 이후 스텝: `ctx = idx[:, -1:]` (마지막 토큰 1개만), positions = cache 길이로 이동
-  - `cache_len >= block_size` 도달 시 캐시 초기화 후 재prefill — OOM 방지
-
-### Cross-Encoder 재정렬 (`source/lc/retriever.py`)
-
-- `bongsoo/klue-cross-encoder-v1` 모델 로드 (`sentence_transformers.CrossEncoder`)
-- `best_match()` 로직 변경: hybrid 점수 상위 10개(`RERANK_TOP_K`) 후보를 Cross-Encoder로 재정렬해 가장 적합한 청크를 반환
-- routing 임계값(`score >= 0.515`) 판단에는 calibrated hybrid 점수를 그대로 유지 — Cross-Encoder 점수로 최적 청크만 교체하고 점수 스케일은 변경하지 않아 임계값 재보정 불필요
-- `.cache/` 전체 삭제 → 다음 서버 기동 시 새 ragdata 포함해 재빌드
-
-### DPO 학습 단계 추가 (`train_all.sh`, `source/model/main.py`)
-
-- `train_all.sh`에 **Stage 5 (train_dpo)** 추가: Stage 4 완료 후 DPO 선호 학습 자동 실행
-- DPO(Direct Preference Optimization): 정답 응답(chosen)과 오답 응답(rejected)의 확률 비를 최대화하는 방식으로 모델이 선호하는 응답 방향을 조정
-  - rejected 쌍은 배치 내 circular-shift로 생성
-  - `loss = -log σ(β*(log π_chosen - log π_rejected - log π_ref_chosen + log π_ref_rejected))`
-- Stage 1 → 2 → 4 → 5 순서로 자동 실행 (진행 중)
-
-### LangGraph 파이프라인 구조 (`source/lg/`)
-
-- **`state.py`**: `GraphState` TypedDict 정의 — `query`, `documents`, `score`, `answer`, `used_rag`, `retry_count`
-- **`nodes.py`**: 노드 팩토리 4개 구현
-  - `make_retriever_node(retriever)`: hybrid 검색 → `documents`, `score` 갱신
-  - `make_grade_node(threshold)`: 점수 비교 → `used_rag` 결정
-  - `make_generate_span_node(span_extractor_fn)`: Span 추출형 답변 생성
-  - `make_generate_direct_node(qa_llm)`: QA LLM 직접 생성 (RAG 미사용 폴백)
-- **`graph.py`**: 사용자가 직접 작성 중. `build_graph(retriever, qa_llm, span_extractor_fn, threshold=0.515)` 함수와 `_route(state)` 라우팅 함수 포함 예정
-
-### RPG ragdata 확장 (`ragdata/`)
-
-기존 `rpg.md` 하나에서 장르별 6개 파일로 세분화:
-
-| 파일 | 내용 |
-|---|---|
-| `rpg_jrpg.md` | JRPG 장르 (FF, DQ, Chrono Trigger 등) |
-| `rpg_mmorpg.md` | MMORPG (WoW, FFXIV, 리니지, 로스트아크 등) |
-| `rpg_mechanics.md` | RPG 공통 시스템 (레벨, 스킬, 아이템, 전투) |
-| `rpg_trpg.md` | TRPG·D&D 규칙, 직업, 주사위 시스템 |
-| `rpg_arpg.md` | ARPG (다크소울, 디아블로, 위처 등) |
-| `rpg_korean_games.md` | 한국 RPG 역사 및 대표작 |
-
-문서 확장으로 RAG 검색 인덱스의 RPG 도메인 커버리지가 크게 향상됨.
 
 ---
 
@@ -158,13 +95,13 @@
 - `ragdata/.gitkeep` 삭제, 서버 재기동 시 `load_ragdata_passages()`가 자동으로 TF-IDF + LangChain 인덱스에 포함
 - `.cache/` 전체 삭제 → 다음 기동 시 새 문서 포함해 재빌드
 
-### README.md · basicdata/info.md 이미지 삽입
+### README.md 이미지 삽입
 
 | 이미지 | 삽입 위치 |
 |---|---|
-| `images/basic_gpt.png` | README `## 개요` 아래 / info.md `source/app/` 섹션 시작부 |
-| `images/rag_gpt.png` | README `## RAG 아키텍처` 아래 / info.md `TfidfRetriever` 설명 앞 |
-| `images/langchain_gpt.png` | README `## LangChain 파이프라인 구조` 아래 / info.md `retriever.py` 섹션 시작부 |
+| `images/basic_gpt.png` | README `## 개요` 아래 |
+| `images/rag_gpt.png` | README `## RAG 아키텍처` 아래 |
+| `images/langchain_gpt.png` | README `## LangChain 파이프라인 구조` 아래 |
 
 ---
 
@@ -182,6 +119,73 @@
 
 - **KorQuAD train set 포함**: `build_tfidf_retriever` / `build_hybrid_retriever` 모두 `include_train=True`로 변경 — dev만(5,774쌍) → train+dev(~61K쌍)로 검색 커버리지 확대
 - **`ragdata/` 폴더 신설**: 앱 시작 시 해당 폴더의 `.txt`/`.md` 파일을 자동으로 읽어 RAG 검색 인덱스에 포함. 도메인 특화 문서를 파일만 넣으면 재학습 없이 검색 범위 확장 가능
+
+---
+
+## 2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장
+
+### bf16 혼합 정밀도 학습 (`source/model/train_utils.py`)
+
+- `torch.autocast(device_type="mps", dtype=torch.bfloat16)` 적용 — M2 Pro는 bf16 네이티브 지원
+- `_AMP_ENABLED = device in ("cuda", "mps")`, `_AMP_DTYPE = torch.bfloat16` 로 활성화 여부를 디바이스 조건으로 결정
+- `_autocast()` 헬퍼를 통해 `train_loop()` 내 gradient accumulation 구간과 `estimate_loss()` 양쪽 모두 적용
+- GradScaler 없이 동작 (bf16 + MPS 조합은 GradScaler 불필요)
+- 기동 시 로그 출력: `[train_utils] bf16 autocast 활성화 (device=mps)`
+
+### KV Cache 추론 최적화 (`source/model/model.py`)
+
+- **`nn.Sequential` → `nn.ModuleList`**: `past_kv` 인자를 각 블록에 순서대로 넘기려면 인덱싱이 필요해 변경. state_dict 키(`blocks.0.`, `blocks.1.`, …)는 동일해 기존 체크포인트와 호환됨
+- **`CausalSelfAttention.forward(past_kv)`**: KV 캐시 슬롯 추가. `past_kv`가 있으면 이전 K/V를 concat해 전체 히스토리 attention을 수행. 반환값이 `(out, (k, v))`로 변경됨
+- **`Block.forward(past_kv)`**: Attention의 `present_kv`를 받아 상위로 전달
+- **`_forward_with_cache(ctx, positions, past_kvs)`**: 각 블록에 레이어별 KV 캐시를 넘기고 새 KV를 수집해 반환하는 내부 메서드
+- **`generate()` 캐시 루프**:
+  - 첫 스텝: 전체 컨텍스트를 한 번에 prefill, `past_kvs` 초기화
+  - 이후 스텝: `ctx = idx[:, -1:]` (마지막 토큰 1개만), positions = cache 길이로 이동
+  - `cache_len >= block_size` 도달 시 캐시 초기화 후 재prefill — OOM 방지
+
+### Cross-Encoder 재정렬 (`source/lc/retriever.py`)
+
+- `bongsoo/klue-cross-encoder-v1` 모델 로드 (`sentence_transformers.CrossEncoder`)
+- `best_match()` 로직 변경: hybrid 점수 상위 10개(`RERANK_TOP_K`) 후보를 Cross-Encoder로 재정렬해 가장 적합한 청크를 반환
+- routing 임계값(`score >= 0.515`) 판단에는 calibrated hybrid 점수를 그대로 유지 — Cross-Encoder 점수로 최적 청크만 교체하고 점수 스케일은 변경하지 않아 임계값 재보정 불필요
+- `.cache/` 전체 삭제 → 다음 서버 기동 시 새 ragdata 포함해 재빌드
+
+### DPO 학습 단계 추가 (`train_all.sh`, `source/model/main.py`)
+
+- `train_all.sh`에 **Stage 5 (train_dpo)** 추가: Stage 4 완료 후 DPO 선호 학습 자동 실행
+- DPO(Direct Preference Optimization): 정답 응답(chosen)과 오답 응답(rejected)의 확률 비를 최대화하는 방식으로 모델이 선호하는 응답 방향을 조정
+  - rejected 쌍은 배치 내 circular-shift로 생성
+  - `loss = -log σ(β*(log π_chosen - log π_rejected - log π_ref_chosen + log π_ref_rejected))`
+- Stage 1 → 2 → 4 → 5 순서로 자동 실행 (진행 중)
+
+### LangGraph 파이프라인 구조 (`source/lg/`)
+
+- **`state.py`**: `GraphState` TypedDict 정의 — `query`, `documents`, `score`, `answer`, `used_rag`, `retry_count`
+- **`nodes.py`**: 노드 팩토리 4개 구현
+  - `make_retriever_node(retriever)`: hybrid 검색 → `documents`, `score` 갱신
+  - `make_grade_node(thresholds)`: retry_count별 임계값 비교 → `used_rag` 결정
+  - `make_generate_span_node(span_extractor_fn)`: Span 추출형 답변 생성
+  - `make_generate_direct_node(qa_llm)`: QA LLM 직접 생성 (RAG 미사용 폴백)
+- **`graph.py`**: `build_graph(retriever, qa_llm, span_extractor_fn, threshold)` + retry 루프 (MAX_RETRIES=2, 임계값 단계적 완화)
+
+### RPG ragdata 확장 + gamejob 신설 (`ragdata/`)
+
+폴더를 `rpg/`와 `gamejob/` 두 서브디렉토리로 분리:
+
+| 파일 | 내용 |
+|---|---|
+| `rpg/rpg_jrpg.md` | JRPG 장르 (FF, DQ, Chrono Trigger 등) |
+| `rpg/rpg_mmorpg.md` | MMORPG (WoW, FFXIV, 리니지, 로스트아크 등) |
+| `rpg/rpg_mechanics.md` | RPG 공통 시스템 (레벨, 스킬, 아이템, 전투) |
+| `rpg/rpg_trpg.md` | TRPG·D&D 규칙, 직업, 주사위 시스템 |
+| `rpg/rpg_arpg.md` | ARPG (다크소울, 디아블로, 위처 등) |
+| `rpg/rpg_korean_games.md` | 한국 RPG 역사 및 대표작 |
+| `gamejob/game_industry_jobs.md` | 게임 직군 (프로그래머/기획/아티스트/QA/운영), 국내 게임사 |
+| `gamejob/game_dev_terms.md` | 개발 프로세스·기술 용어 (알파/베타/골드/폴리곤/셰이더 등) |
+| `gamejob/game_business_terms.md` | BM/KPI 용어 (F2P/가챠/DAU/ARPU/LTV 등) |
+| `gamejob/korean_game_industry.md` | 취업/연봉/트렌드/법규 |
+
+`load_ragdata_passages()`가 `rglob("*")`을 사용해 서브디렉토리를 자동 탐색 — 코드 변경 없이 폴더 추가만으로 인덱스 확장 가능.
 
 ---
 
@@ -293,11 +297,11 @@
 
 > 잡담 질문이 RAG로 새는 오분류를 줄이기 위해 검색기를 개선했습니다.
 
-- **임베딩 검색 시도**: `transformers`의 `klue/bert-base`로 1차 시도 — 문장 유사도용으로 학습된 모델이 아니라 모든 문장이 비슷한 점수로 뭉치는 anisotropy 문제 확인, 문장 유사도(STS)로 파인튜닝된 `jhgan/ko-sroberta-multitask`로 교체 (SKT KoBERT는 별도 sentencepiece 토크나이저 패키지가 필요해 AutoTokenizer로 바로 쓸 수 있는 동급 모델로 대체)
+- **임베딩 검색 시도**: `transformers`의 `klue/bert-base`로 1차 시도 — 문장 유사도용으로 학습된 모델이 아니라 모든 문장이 비슷한 점수로 뭉치는 anisotropy 문제 확인, 문장 유사도(STS)로 파인튜닝된 `jhgan/ko-sroberta-multitask`로 교체
 - **순수 임베딩도 단독으로는 부족함을 확인**: 격식체(위키)와 구어체(잡담) 사이의 문체 유사도가 주제 유사도보다 점수에 더 큰 영향을 줘서, "사랑해"가 진짜 사실형 질문보다 유사도가 높게 나오는 역전이 발생
-- **하이브리드 점수 도입 + 정규화 버그 수정**: `hybrid_score = α·normalize(sparse) + (1-α)·normalize(dense)` (α=0.5) 자체는 맞는 접근이었으나, 처음엔 질문마다 그 질문 내부에서 min-max 정규화를 해서 "1등 청크"가 관련 여부와 무관하게 항상 1.0 근처로 나오는 버그가 있었음
+- **하이브리드 점수 도입 + 정규화 버그 수정**: `hybrid_score = α·normalize(sparse) + (1-α)·normalize(dense)` (α=0.5). 처음엔 질문마다 내부에서 min-max 정규화를 해서 "1등 청크"가 관련 여부와 무관하게 항상 1.0 근처로 나오는 버그가 있었음
   - `rag.calibrate()` 추가: KorQuAD 질문(relevant) vs 챗봇 데이터 질문(irrelevant) 80개씩 샘플로 sparse/dense 점수의 정상 범위를 **한 번만 고정** 측정 → 이 고정값으로 정규화해야 질문들 사이에 비교 가능한 절대 점수가 됨
-- **held-out 검증으로 효과 확인**: 보정용 샘플과 평가용 샘플을 분리해서 측정 — TF-IDF 단독 분류 정확도 73.3%(임계값 0.26) → 하이브리드+고정보정 82.7%(임계값 0.515)
+- **held-out 검증으로 효과 확인**: TF-IDF 단독 분류 정확도 73.3%(임계값 0.26) → 하이브리드+고정보정 82.7%(임계값 0.515)
 - `app.py`/`main.py`/`chat.py`: `rag.build_index()`가 `(tfidf_vectorizer, tfidf_matrix, embed_matrix, passages, norm_bounds)` 5종을 반환하도록 변경, `RAG_SIM_THRESHOLD`를 0.25 → 0.515로 갱신
 
 ---
@@ -315,6 +319,32 @@
 ---
 
 ## 회고
+
+<details>
+<summary><b>2026-07-01 — 분리가 유지보수를 만든다</b></summary>
+
+- **622줄짜리 `app.py`를 6개 파일로 나누면서 "파일이 커질 때 어디서 나눠야 하는가"를 고민했다.** 기능별(state/routing/streaming/ui)로 쪼갰더니 각 파일이 한 가지 책임만 갖게 됐고, 이후 LangGraph 엔드포인트 추가할 때 `routers/chat.py`만 건드리면 됐다. 처음부터 나눠뒀어야 했다는 생각이 들었다.
+- **Claude와 SOP_GPT를 나란히 두는 분할화면은 비교 실험 도구가 됐다.** 같은 질문에 두 모델이 동시에 답하는 걸 보면서 어디서 차이가 나는지 직접 확인할 수 있었다. 모델 성능 차이를 수치가 아니라 감각으로 느끼는 데 이게 훨씬 직접적이었다.
+- **SSE 스트리밍에서 동기 PyTorch를 비동기 FastAPI에 붙이는 방법이 핵심 문제였다.** `asyncio.run_in_executor`로 스레드에서 돌리고 `queue.Queue`로 토큰을 넘기는 구조가 정답이었다. 처음엔 그냥 `async def` 안에서 호출했다가 블로킹이 걸렸고, 이 패턴을 찾는 데 시간이 걸렸다.
+
+</details>
+
+<details>
+<summary><b>2026-06-30 — 데이터가 많다고 다 좋은 건 아니다</b></summary>
+
+- **AI Hub 데이터 4종을 추가하면서 "데이터를 많이 넣으면 좋아진다"는 단순한 믿음이 흔들렸다.** 데이터 양은 늘었지만 포맷이 제각각이라 전처리를 통일하는 데 더 많은 시간이 들었다. 데이터 품질과 포맷 일관성이 양보다 중요하다는 걸 체감했다.
+- **KorQuAD train set을 검색 인덱스에 추가한 건 맞는 방향이었다.** dev only(5,774개)에서 train+dev(~61K개)로 늘리니 롱테일 질문에서 관련 문단을 찾는 확률이 높아졌다. 학습 데이터와 검색 인덱스 데이터는 별개 역할이라 겹쳐도 문제없다는 점을 명확히 이해했다.
+
+</details>
+
+<details>
+<summary><b>2026-06-29 — 작은 개선들이 쌓여야 의미가 생긴다</b></summary>
+
+- **bf16, KV Cache, Cross-Encoder를 각각 따로 붙이면서 "왜 이게 필요한가"를 하나씩 확인했다.** bf16은 M2에서 메모리와 속도 둘 다 잡는다. KV Cache는 이미 계산한 걸 다시 계산하지 않는다. Cross-Encoder는 top-10 후보 중 진짜 최적을 가려낸다. 각각이 독립적으로 다른 문제를 해결한다.
+- **LangGraph로 파이프라인을 그래프로 표현하면서 "조건 분기를 코드가 아니라 구조로 표현한다"는 감각을 얻었다.** if-else로 짜던 라우팅 로직이 노드와 엣지로 바뀌면서 흐름이 눈에 보였다. retry 로직도 루프 엣지 하나로 표현되니 코드보다 의도가 명확했다.
+- **ragdata를 rpg/와 gamejob/으로 나누면서 rglob이 서브디렉토리를 자동 탐색한다는 걸 확인했다.** 코드를 건드리지 않고 폴더 구조만 바꿔서 도메인 확장이 됐다. 처음부터 이렇게 설계해뒀어야 한다.
+
+</details>
 
 <details>
 <summary><b>2026-06-28 — 모델을 키운다고 항상 빠르게 좋아지는 건 아니다</b></summary>
