@@ -9,7 +9,7 @@
 ![STEP 1 – Basic GPT Chatbot](images/basic_gpt.png)
 
 - **토크나이저**: 한글을 NFD로 분해(초성/중성/종성 자모)한 뒤 BPE 적용, NFC로 재조합해 출력 (직접 구현)
-- **모델**: `CausalSelfAttention` / `Block` / `SOP_GPT`로 구성된 GPT 디코더 (block_size=256, n_embd=512, n_head=8, n_layer=12)
+- **모델**: `CausalSelfAttention` / `Block` / `SOP_GPT`로 구성된 GPT 디코더 (block_size=256, n_embd=768, n_head=12, n_layer=12, ~97M params)
 - **학습 단계**
   - **Stage 1 (이어쓰기)**: kowikitext + 한국어 챗봇 Q&A 데이터 + AI Hub 한국어 대화 데이터로 다음 토큰 예측 학습
   - **Stage 2 (Q&A 응답)**: songys/Chatbot_data(11,823쌍) + KorQuAD로 `"질문: ...\n답변: ..."` 포맷 파인튜닝
@@ -22,6 +22,55 @@
 - **Claude API 연동**: 동일한 검색기를 재사용하고 답변 생성만 `claude-haiku-4-5-20251001`으로 교체. SOP_GPT와 실시간 비교 가능
 - **서빙**: FastAPI로 채팅 엔드포인트 + SSE 스트리밍 엔드포인트 제공 + 분할화면 웹 UI
 - **트레이싱**: LangSmith로 체인 실행 기록 자동 수집 (APAC 엔드포인트)
+
+## 모델 아키텍처 (`source/model/model.py`)
+
+학습된 가중치(.pt)는 용량 문제로 저장소에 포함되지 않으며, `train_all.sh`로 재현할 수 있습니다.
+
+### SOP_GPT — 이어쓰기 / QA 생성 모델
+
+GPT-2와 동일한 디코더 전용 Transformer. Pre-norm(LayerNorm → Attention) 구조로 학습 안정성을 높였다.
+
+```
+tok_emb  : Embedding(vocab_size → 768)   # 토큰 임베딩
+pos_emb  : Embedding(256 → 768)          # 위치 임베딩 (학습 가능)
+blocks   : 12 × Block                    # Transformer 디코더 블록
+  └─ CausalSelfAttention                 #   인과적 멀티헤드 어텐션 (12 heads, head_dim=64)
+  └─ MLP (768→3072→768, GELU)           #   피드포워드
+ln_f     : LayerNorm                     # 최종 정규화
+head     : Linear(768 → vocab_size)      # 다음 토큰 확률 (tok_emb와 weight tying)
+```
+
+| 하이퍼파라미터 | 값 |
+|---|---|
+| block_size (컨텍스트 길이) | 256 |
+| n_embd (임베딩 차원) | 768 |
+| n_head (어텐션 헤드) | 12 |
+| n_layer (블록 수) | 12 |
+| 파라미터 수 | ~97M |
+
+**KV Cache**: 추론 시 각 블록의 K/V 텐서를 캐시해 마지막 토큰 1개만 처리하는 증분 디코딩 적용. prefill 이후 속도를 대폭 단축.
+
+**생성 옵션**: temperature / top-k / top-p (nucleus sampling) / repetition penalty / stop tokens
+
+### SOP_GPT_Span — 추출형 QA 모델
+
+`SOP_GPT`와 동일한 Transformer 본체를 사용하지만 `head` 대신 `qa_head`를 달아 **스팬 추출** 태스크를 수행.
+
+```
+(SOP_GPT 본체 동일)
+qa_head : Linear(768 → 2)   # 토큰별 (start_logit, end_logit) 출력
+```
+
+`"질문: {질문}\n참고: {컨텍스트}"` 형식의 입력에서 정답의 시작/끝 토큰 위치를 분류한다. 자기회귀 생성이 아니라 분류 태스크이므로 오류 누적 없이 작은 모델로도 정확한 위치를 찾을 수 있다.
+
+### 체크포인트와 역할
+
+| 파일 | 클래스 | 학습 단계 | 역할 |
+|---|---|---|---|
+| `SOP_GPT.pt` | `SOP_GPT` | Stage 1 이어쓰기 | `/generate` 자유 텍스트 생성 |
+| `SOP_GPT_qa.pt` | `SOP_GPT` | Stage 2 Q&A 파인튜닝 | RAG 점수 미달 시 직접 답변 생성 |
+| `SOP_GPT_span.pt` | `SOP_GPT_Span` | Stage 4 스팬 학습 | RAG 점수 초과 시 컨텍스트에서 정답 위치 추출 |
 
 ## RAG 아키텍처
 
@@ -188,7 +237,7 @@ python main.py chat_span     # Stage 4 RAG QA REPL
 - `GET /` — 분할화면 웹 채팅 UI (좌: SOP_GPT, 우: Claude)
 - `GET /docs` — Swagger UI
 
-자세한 개발 과정은 [basicdata/plan.md](basicdata/plan.md), 코드 설명은 [basicdata/info.md](basicdata/info.md), 단계별 변경 이력은 [version.md](version.md), 체인 평가 결과는 [basicdata/eval.md](basicdata/eval.md) 참고.
+자세한 개발 과정은 [basicdata/plan.md](basicdata/plan.md), 단계별 변경 이력은 [version.md](version.md), 체인 평가 결과는 [basicdata/eval.md](basicdata/eval.md) 참고.
 
 ## 데이터 출처
 
