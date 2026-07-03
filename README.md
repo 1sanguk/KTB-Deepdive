@@ -9,6 +9,8 @@
 
 | 주차 | 주제 | 언어 | 링크 |
 |:----:|------|:----:|:----:|
+| Project | 한국어 Mini-GPT 챗봇 (자체 GPT + RAG + LangChain 풀스택) | LLM | [바로가기](LLM_Project/chatbot/README.md) |
+| 08 | MCP Context Isolation (보안·권한·데이터 오염 문제 분석) | LLM | [바로가기](08/README.md) |
 | 06 | Hybrid Search (Sparse + Dense Vector 검색) | Python | [바로가기](06/README.md) |
 | 05 | 트랜스포머의 위치 인코딩 3가지 비교 | Python | [바로가기](05/README.md) |
 | 04 | 데이터 전처리 방식에 따른 머신러닝 모델 성능 변화 | Python | [바로가기](04/README.md) |
@@ -18,6 +20,48 @@
 ---
 
 ## 주차별 요약
+
+### LLM_Project — 한국어 Mini-GPT 챗봇 (LangChain RAG)
+
+> 자모(NFD) 단위 BPE 토크나이저부터 GPT 아키텍처, 학습, RAG, LangChain 파이프라인, FastAPI 서빙, LangSmith 트레이싱까지 전부 직접 구현한 한국어 챗봇 프로젝트.
+
+**핵심 결론**
+
+- 직접 구현한 GPT 디코더(~97M params, 12층)를 단계별로 학습: **Stage 1** 이어쓰기 → **Stage 2** Q&A 파인튜닝 → **Stage 4** 추출형 QA(정답 스팬 위치 분류) → **Stage 5** DPO 선호 학습(진행 중)
+- 검색 방식에 따라 **Basic / RAG(TF-IDF) / LangChain(BM25+FAISS 하이브리드)** 3가지 모드를 제공하고, 검색 점수가 임계값 미만이면 Stage 2(잡담형) 모델로, 이상이면 Stage 4(추출형) 모델로 라우팅
+- 하이브리드 검색(BM25+FAISS) 도입으로 라우팅 정확도가 TF-IDF 단독 73.3% → **82.7%**로 향상 (held-out 검증 기준)
+- LangChain LCEL로 체인을 표준화하고 FastAPI + SSE 스트리밍으로 서빙, 동일 검색기를 재사용해 SOP_GPT와 Claude API 응답을 분할화면으로 실시간 비교
+- LangSmith로 체인 실행 트레이싱 자동 수집
+
+| 모드 | 검색기 | 라우팅 임계값 | 미달 시 폴백 |
+|---|---|:--:|---|
+| Basic | 없음 | - | Stage 2 직접 생성 |
+| RAG | TF-IDF + 코사인 유사도 | ≥ 0.25 | Stage 2 직접 생성 |
+| LangChain | BM25 + FAISS 하이브리드 | ≥ 0.515 | Stage 2 직접 생성 |
+
+자세한 내용 → [LLM_Project/chatbot/README.md](LLM_Project/chatbot/README.md)
+
+---
+
+### Week 08 — MCP Context Isolation
+
+> MCP의 Context Isolation이 AI Agent와 외부 도구·데이터 소스를 연결할 때 필요한 이유를 설명하고, 컨텍스트가 분리되지 않았을 때 발생할 수 있는 보안·권한·데이터 오염 문제를 구체적으로 분석하시오.
+
+**핵심 결론**
+
+- **MCP(Model Context Protocol)**는 LLM이 외부 도구·데이터와 통신하기 위해 Anthropic이 만든 JSON-RPC 기반 표준 규약. 도구마다 제각각인 연동 방식을 하나의 계층으로 통일한다.
+- LLM은 **최신성·환각성·실행성**이라는 근본적 한계가 있어 외부 도구 연결이 필수인데, 이 연결 지점을 **Context Isolation**(데이터 분리, 권한 분리, 도구 분리, 실행 환경 분리)으로 걸러내지 않으면 문제가 생긴다.
+- Context Isolation이 없을 때 발생하는 문제는 **보안·권한·데이터 오염** 세 갈래로 번지며, 셋 다 "무엇을 보여줄지"를 미리 걸러내지 못한 동일한 원인에서 파생된다.
+
+| 구분 | 핵심 원인 | 대표 시나리오 |
+|---|---|---|
+| 보안 | 도구/데이터를 통해 들어온 텍스트를 지시로 오인 | 프롬프트 인젝션, Tool Poisoning, 데이터 유출 |
+| 권한 | Agent의 권한과 사용자의 권한이 분리되지 않음 | 과도한 권한 부여, Confused Deputy, 세션 간 권한 누수 |
+| 데이터 오염 | 컨텍스트·메모리가 출처·세션별로 분리되지 않음 | 컨텍스트 희석, 크로스 유저 오염, 캐시 포이즈닝 |
+
+자세한 내용 → [08/README.md](08/README.md)
+
+---
 
 ### Week 06 — Hybrid Search
 
@@ -130,6 +174,18 @@
 
 ```
 KTB-DeepDive/
+├── LLM_Project/       # 한국어 Mini-GPT 챗봇 (GPT 아키텍처 + RAG + LangChain, 별도 프로젝트)
+│   └── chatbot/
+│       ├── README.md
+│       ├── version.md
+│       ├── images/           # 아키텍처 다이어그램
+│       ├── ragdata/          # RAG 검색용 커스텀 문서
+│       └── source/
+│           ├── app/          # FastAPI 서빙 (chat.py, stream.py, ui.py)
+│           ├── lc/           # LangChain 통합 레이어 (retriever, llm, chain)
+│           ├── lg/           # LangGraph 파이프라인 레이어
+│           ├── rag/          # TF-IDF 검색기
+│           └── model/        # BPE 토크나이저, GPT 모델, 학습 루프, 체크포인트
 ├── 02/               # Week 02 — 이터레이터 & 제너레이터
 │   ├── README.md
 │   ├── example1.py   # 기본 크기 비교
@@ -145,7 +201,9 @@ KTB-DeepDive/
 ├── 05/               # Week 05 — 트랜스포머의 위치 인코딩
 │   ├── README.md
 │   └── example.py
-└── 06/               # Week 06 — Hybrid Search
-    ├── README.md
-    └── example.py
+├── 06/               # Week 06 — Hybrid Search
+│   ├── README.md
+│   └── example.py
+└── 08/               # Week 08 — MCP Context Isolation
+    └── README.md
 ```
