@@ -8,9 +8,13 @@ basic / tfidf_rag / lc_rag 세 체인의 정답 포함률을 비교한다.
     python evaluate.py
 """
 
+import os
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
@@ -29,13 +33,15 @@ from lc.llm import SOP_GPT_LLM, make_span_extractor
 from lc.chain import build_basic_chain, build_rag_chain
 from lc.retriever import build_hybrid_retriever
 from rag.rag import build_tfidf_retriever, load_korquad_qa_pairs
+from lg.graph import build_graph
 
 # ── 설정 ───────────────────────────────────────────────────────────────────────
-MODEL_DIR      = Path(__file__).resolve().parent / "model"
-DATASET_NAME   = "sop-gpt-korquad"
-EVAL_SAMPLES   = 30   # 평가에 쓸 KorQuAD 예제 수 (추론이 느리므로 소규모로)
-RAG_THRESHOLD  = 0.515
-TFIDF_THRESHOLD = 0.25
+MODEL_DIR        = Path(__file__).resolve().parent / "model"
+DATASET_NAME     = "sop-gpt-korquad"
+EVAL_SAMPLES     = 30   # 평가에 쓸 KorQuAD 예제 수 (추론이 느리므로 소규모로)
+RAG_THRESHOLD    = 0.515
+TFIDF_THRESHOLD  = 0.25
+GRAPH_THRESHOLD  = [0.25, 0.2, 0.15]
 
 # ── 모델 & 체인 로드 ───────────────────────────────────────────────────────────
 print("모델 로딩 중...")
@@ -65,6 +71,7 @@ lc_retriever    = build_hybrid_retriever()
 basic_chain     = build_basic_chain(qa_llm)
 tfidf_rag_chain = build_rag_chain(tfidf_retriever, qa_llm, span_extractor_fn, TFIDF_THRESHOLD)
 lc_rag_chain    = build_rag_chain(lc_retriever,    qa_llm, span_extractor_fn, RAG_THRESHOLD)
+lg_graph        = build_graph(lc_retriever, qa_llm, span_extractor_fn, GRAPH_THRESHOLD)
 
 # ── Dataset 생성 ───────────────────────────────────────────────────────────────
 import os
@@ -110,10 +117,22 @@ def run_lc_rag(inputs):
     result = lc_rag_chain.invoke(inputs["question"])
     return {"answer": result["answer"]}
 
+def run_lg_graph(inputs):
+    result = lg_graph.invoke({
+        "query": inputs["question"],
+        "documents": [],
+        "score": 0.0,
+        "answer": "",
+        "used_rag": False,
+        "retry_count": 0,
+    })
+    return {"answer": result["answer"]}
+
 for label, target in [
     ("basic",     run_basic),
     ("tfidf_rag", run_tfidf_rag),
     ("lc_rag",    run_lc_rag),
+    ("lg_graph",  run_lg_graph),
 ]:
     print(f"\n[{label}] 평가 중...")
     results = evaluate(
