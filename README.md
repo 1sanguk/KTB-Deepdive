@@ -30,14 +30,16 @@
 - 직접 구현한 GPT 디코더(~97M params, 12층)를 단계별로 학습: **Stage 1** 이어쓰기 → **Stage 2** Q&A 파인튜닝 → **Stage 4** 추출형 QA(정답 스팬 위치 분류) → **Stage 5** DPO 선호 학습(진행 중)
 - 검색 방식에 따라 **Basic / RAG(TF-IDF) / LangChain(BM25+FAISS 하이브리드)** 3가지 모드를 제공하고, 검색 점수가 임계값 미만이면 Stage 2(잡담형) 모델로, 이상이면 Stage 4(추출형) 모델로 라우팅
 - 하이브리드 검색(BM25+FAISS) 도입으로 라우팅 정확도가 TF-IDF 단독 73.3% → **82.7%**로 향상 (held-out 검증 기준)
+- **LangGraph**로 별도의 상태 기반(StateGraph) 파이프라인도 구현 — 검색 실패 시 단순 폴백이 아니라 **노드 재시도(retry) 루프**를 거치며, `build_graph`(SOP_GPT) / `build_claude_graph` / `build_claude_agent_graph`(Claude Agent 도구 호출) 3가지 그래프를 노드 팩토리 8개(SOP_GPT 4 + Claude 4)로 조립
 - LangChain LCEL로 체인을 표준화하고 FastAPI + SSE 스트리밍으로 서빙, 동일 검색기를 재사용해 SOP_GPT와 Claude API 응답을 분할화면으로 실시간 비교
 - LangSmith로 체인 실행 트레이싱 자동 수집
 
-| 모드 | 검색기 | 라우팅 임계값 | 미달 시 폴백 |
-|---|---|:--:|---|
-| Basic | 없음 | - | Stage 2 직접 생성 |
-| RAG | TF-IDF + 코사인 유사도 | ≥ 0.25 | Stage 2 직접 생성 |
-| LangChain | BM25 + FAISS 하이브리드 | ≥ 0.515 | Stage 2 직접 생성 |
+| 모드 | 검색기 | 라우팅 임계값 | 미달 시 폴백 | 비고 |
+|---|---|:--:|---|---|
+| Basic | 없음 | - | Stage 2 직접 생성 | |
+| RAG | TF-IDF + 코사인 유사도 | ≥ 0.25 | Stage 2 직접 생성 | |
+| LangChain | BM25 + FAISS 하이브리드 | ≥ 0.515 | Stage 2 직접 생성 | LCEL 체인 |
+| LangGraph | BM25 + FAISS 하이브리드 | ≥ 0.515 | Stage 2 직접 생성 | 노드 재시도 루프 + Claude Agent 도구 호출 지원 |
 
 자세한 내용 → [LLM_Project/chatbot/README.md](LLM_Project/chatbot/README.md)
 
