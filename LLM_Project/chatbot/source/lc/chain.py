@@ -8,12 +8,31 @@ from typing import Callable
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from langchain_core.runnables import Runnable, RunnableLambda, RunnablePassthrough
+
+from lc.llm import SOP_GPT_LLM
+from lc.retriever import HybridRetriever
 
 QA_PROMPT = PromptTemplate.from_template("질문: {question}\n답변: ")
 
 
-def build_basic_chain(llm):
+def _expand_span(span: str, context: str) -> str:
+    """span이 포함된 문장 + 앞뒤 문장을 context에서 추출해 반환.
+
+    span이 너무 짧으면(마크다운/테이블 형식 등) context를 직접 반환한다.
+    """
+    if not span or len(span) < 30:
+        return context
+    sentences = [s.strip() for s in context.replace('!', '.').replace('?', '.').split('.') if s.strip()]
+    for i, s in enumerate(sentences):
+        if span in s:
+            start = max(0, i - 2)
+            end = min(len(sentences), i + 3)
+            return '. '.join(sentences[start:end]) + '.'
+    return context
+
+
+def build_basic_chain(llm: SOP_GPT_LLM) -> Runnable:
     """Stage 2: 검색 없이 QA 모델이 직접 답변하는 LCEL 체인.
 
     Input : str  — 질문
@@ -27,7 +46,7 @@ def build_basic_chain(llm):
     )
 
 
-def build_rag_chain(retriever, llm, span_extractor_fn: Callable, threshold: float):
+def build_rag_chain(retriever: HybridRetriever, llm: SOP_GPT_LLM, span_extractor_fn: Callable[[dict], str], threshold: float) -> Runnable:
     """RAG 기반 LCEL 체인.
 
     retriever.best_match(question) → (context, score)
@@ -40,7 +59,8 @@ def build_rag_chain(retriever, llm, span_extractor_fn: Callable, threshold: floa
     def retrieve_and_answer(question: str) -> dict:
         context, score = retriever.best_match(question)
         if score >= threshold:
-            answer = span_extractor_fn({"question": question, "context": context})
+            span = span_extractor_fn({"question": question, "context": context})
+            answer = _expand_span(span, context)
             return {"answer": answer, "retrieved_context": context, "used_rag": True}
         answer = llm.invoke(f"질문: {question}\n답변: ")
         return {"answer": answer, "retrieved_context": "", "used_rag": False}

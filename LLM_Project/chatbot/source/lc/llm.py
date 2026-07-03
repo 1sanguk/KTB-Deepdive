@@ -6,7 +6,7 @@ make_span_extractor : SOP_GPT_Span 추출형 QA를 LCEL RunnableLambda 주입용
 
 import sys
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Generator, List, Optional
 
 import torch
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -47,7 +47,7 @@ class SOP_GPT_LLM(LLM):
     def _llm_type(self) -> str:
         return "sop_gpt"
 
-    def _stop_tokens(self) -> set:
+    def _stop_tokens(self) -> set[int] | None:
         """stop_on 설정에 따른 stop token id 집합을 반환. EOS 토큰은 항상 포함."""
         if self.stop_on == "line":
             ids = {i for t, i in self.stoi.items() if t.endswith("\n")}
@@ -67,44 +67,52 @@ class SOP_GPT_LLM(LLM):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> str:
-        stop_tokens = self._stop_tokens()
+        try:
+            stop_tokens = self._stop_tokens()
+            ids = [self.stoi[t] for t in tokenize(prompt, self.merges, self.base_set) if t in self.stoi]
+            if not ids:
+                ids = [0]  # 입력이 vocab에 없을 때 START_ID 로 대체
+            idx = torch.tensor([ids], dtype=torch.long, device=device)
+            out = self.torch_model.generate(
+                idx, self.max_new_tokens,
+                stop_tokens=stop_tokens,
+                temperature=self.temperature,
+                top_k=self.top_k,
+                top_p=self.top_p,
+                repetition_penalty=self.repetition_penalty,
+            )[0].tolist()
+            return decode(out[len(ids):], self.itos).strip()
+        except torch.cuda.OutOfMemoryError:
+            return "[오류] GPU 메모리가 부족합니다."
+        except Exception as e:
+            return f"[오류] 모델 추론 중 오류가 발생했습니다. ({type(e).__name__})"
 
-        ids = [self.stoi[t] for t in tokenize(prompt, self.merges, self.base_set) if t in self.stoi]
-        if not ids:
-            ids = [0]  # 입력이 vocab에 없을 때 START_ID 로 대체
-        idx = torch.tensor([ids], dtype=torch.long, device=device)
-        out = self.torch_model.generate(
-            idx, self.max_new_tokens,
-            stop_tokens=stop_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
-            top_p=self.top_p,
-            repetition_penalty=self.repetition_penalty,
-        )[0].tolist()
-        return decode(out[len(ids):], self.itos).strip()
-
-    def stream_tokens(self, prompt: str):
+    def stream_tokens(self, prompt: str) -> Generator[str, None, None]:
         """토큰 생성마다 현재까지 디코딩된 전체 텍스트를 yield하는 동기 제너레이터."""
-        stop_tokens = self._stop_tokens()
+        try:
+            stop_tokens = self._stop_tokens()
+            ids = [self.stoi[t] for t in tokenize(prompt, self.merges, self.base_set) if t in self.stoi]
+            if not ids:
+                ids = [0]
+            idx = torch.tensor([ids], dtype=torch.long, device=device)
+            generated: list[int] = []
+            for token_id in self.torch_model.generate_stream(
+                idx, self.max_new_tokens,
+                stop_tokens=stop_tokens,
+                temperature=self.temperature,
+                top_k=self.top_k,
+                top_p=self.top_p,
+                repetition_penalty=self.repetition_penalty,
+            ):
+                generated.append(token_id)
+                yield decode(generated, self.itos).strip()
+        except torch.cuda.OutOfMemoryError:
+            yield "[오류] GPU 메모리가 부족합니다."
+        except Exception as e:
+            yield f"[오류] 모델 추론 중 오류가 발생했습니다. ({type(e).__name__})"
 
-        ids = [self.stoi[t] for t in tokenize(prompt, self.merges, self.base_set) if t in self.stoi]
-        if not ids:
-            ids = [0]
-        idx = torch.tensor([ids], dtype=torch.long, device=device)
-        generated: list[int] = []
-        for token_id in self.torch_model.generate_stream(
-            idx, self.max_new_tokens,
-            stop_tokens=stop_tokens,
-            temperature=self.temperature,
-            top_k=self.top_k,
-            top_p=self.top_p,
-            repetition_penalty=self.repetition_penalty,
-        ):
-            generated.append(token_id)
-            yield decode(generated, self.itos).strip()
 
-
-def make_span_extractor(span_model, stoi, merges, base_set) -> Callable[[dict], str]:
+def make_span_extractor(span_model: Any, stoi: dict[str, int], merges: Any, base_set: set[str]) -> Callable[[dict], str]:
     """SOP_GPT_Span 추출형 QA를 {"question", "context"} → str 함수로 반환.
 
     chain.py 의 RunnableLambda 에 주입해 LCEL 체인 안에서 사용한다.

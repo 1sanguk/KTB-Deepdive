@@ -98,6 +98,17 @@ source/
 - `app/app.py`는 `__file__` 기준으로 `../model`을 `sys.path`에 추가해 어디서 실행해도 동작
 - `/chat`은 검색 유사도(hybrid_score)에 따라 Stage4(추출형, ≥0.515) ↔ Stage2(잡담형, <0.515)로 자동 라우팅
 
+## Phase 10 — Stage 5: DPO (Direct Preference Optimization) ✅
+- **목적**: Stage 2 SFT 모델이 "어떻게 대답할지"는 알지만 "좋은 답 vs 나쁜 답"을 구분하지 못하는 한계를 개선
+- **구현**: `source/model/dpo.py` 신규 작성, `main.py`에 `train_dpo` 모드 추가
+- **레퍼런스 모델**: `SOP_GPT_qa.pt`를 `deepcopy` 후 freeze → policy 모델이 SFT에서 너무 벗어나지 않도록 KL 페널티 역할
+- **선호 쌍 생성 전략**: 별도 인간 레이블링 없이 배치 내 circular shift로 rejected 자동 생성 (chosen=정답 답변, rejected=다른 질문의 답변)
+- **학습 데이터**: chatbot Q&A(11,823쌍) + KorQuAD 쌍 전체
+- **손실 함수**: `-log sigmoid(β · ((log π_θ(chosen) - log π_θ(rejected)) - (log π_ref(chosen) - log π_ref(rejected))))`
+- **하이퍼파라미터**: lr=1e-5, beta=0.1, steps=1000
+- **결과물**: `SOP_GPT_dpo.pt`
+- 실행: `python main.py train_dpo`
+
 ## 스트레치 골 (여유 있을 때)
 - temperature / top-k / top-p 샘플링
 - KV cache로 생성 속도 개선

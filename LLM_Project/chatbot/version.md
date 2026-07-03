@@ -2,6 +2,8 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-03 — Claude Agent + Hybrid Retriever 수정 + RAG 답변 품질 개선](#2026-07-03--claude-agent--hybrid-retriever-수정--rag-답변-품질-개선)
+- [2026-07-02 — LangGraph Claude 파이프라인 + UI LangGraph 모드 + 전역 예외 처리](#2026-07-02--langgraph-claude-파이프라인--ui-langgraph-모드--전역-예외-처리)
 - [2026-07-01 — Claude API 연동 + 스트리밍 + 분할화면 UI + app.py 모듈화 + RPG 문서](#2026-07-01--claude-api-연동--스트리밍--분할화면-ui--apppy-모듈화--rpg-문서)
 - [2026-06-30 — AI Hub 대화 데이터 추가 + RAG 확장](#2026-06-30--ai-hub-대화-데이터-추가--rag-확장)
 - [2026-06-29 — bf16 + KV Cache + Cross-Encoder 재정렬 + DPO + LangGraph + RPG 문서 확장](#2026-06-29--bf16--kv-cache--cross-encoder-재정렬--dpo--langgraph--rpg-문서-확장)
@@ -11,6 +13,198 @@
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
 - [회고](#회고)
+
+---
+
+## 2026-07-03 — Claude Agent + Hybrid Retriever 수정 + RAG 답변 품질 개선
+
+### Claude tool_use Agent (`lg/graph.py`, `lg/nodes.py`, `lg/models.py`)
+
+**`lg/models.py`** — `AgentState` TypedDict 추가:
+```python
+class AgentState(TypedDict):
+    query: str
+    messages: list
+    stop_reason: str
+    answer: str
+    used_rag: bool
+    retrieved_context: str
+```
+
+**`lg/nodes.py`** — Claude Agent 전용 노드 팩토리 2개 추가:
+
+| 팩토리 | 역할 |
+|---|---|
+| `make_claude_agent_node()` | Claude API 호출, tool_use/end_turn stop_reason 반환 |
+| `make_tool_executor_node(retriever)` | `search_knowledge_base` 도구 실행, HybridRetriever로 검색 후 tool_result 추가 |
+
+**`lc/claude_llm.py`** — Agent 관련 상수/함수 추가:
+- `AGENT_TOOLS`: `search_knowledge_base` 도구 스키마 (한국어 지식 베이스 검색)
+- `AGENT_SYSTEM`: 사실 확인 질문에 도구를 자율 판단으로 호출하는 시스템 프롬프트
+- `call_claude_agent_sync(messages)`: tool_use 활성화된 Claude 동기 호출
+
+**`lg/graph.py`** — `build_claude_agent_graph(retriever)` 완성:
+```
+흐름: init → agent → (tool_use → tool_executor → agent | end_turn → END)
+```
+- `_init_messages`: query를 최초 user 메시지로 변환하는 진입 노드
+- `_agent_should_continue`: stop_reason에 따라 tool/end 분기
+- 도구 호출 루프: Claude가 자율적으로 tool_use를 결정하고, tool_executor가 검색 실행 후 메시지에 tool_result 추가
+
+---
+
+### RAG 답변 확장 (`lc/chain.py`, `app/streaming.py`, `lg/nodes.py`)
+
+**`lc/chain.py`** — `_expand_span()` 추가:
+- span 길이 < 30자이면 context 전체 반환 (마크다운·테이블 청크 대응)
+- span ≥ 30자이면 해당 문장 + 앞뒤 2문장 반환
+
+**`app/streaming.py`** — `sop_rag_stream`에 `_expand_span` 적용:
+- 기존에는 span_extractor 결과를 그대로 answer로 사용 → 1~3자 단답 출력
+- 수정 후 `_expand_span`을 거쳐 문장 단위로 확장된 답변 반환
+
+**`lg/nodes.py`** — `make_generate_span_node`에 동일 확장 로직 적용:
+- span < 30자 → context 전체 반환
+- span ≥ 30자 → 주변 문장 확장
+
+---
+
+### LangGraph UI 말풍선 분리 (`app/streaming.py`, `app/ui.py`)
+
+**`app/streaming.py`**:
+- `generate_span`(RAG 성공) → `{"type": "text"}` 이벤트 — 기존 상태 말풍선에 답변 표시
+- `generate_direct`(RAG 실패, qa_llm fallback) → `{"type": "text_fallback"}` 이벤트 — **새 말풍선**에 표시
+
+**`app/ui.py`** — 이벤트 타입별 말풍선 처리:
+- `status` (`검색 중....`, `재시도 중....`): 같은 말풍선에서 텍스트 교체
+- `text` (RAG 성공): 상태 말풍선이 답변으로 전환
+- `text_fallback` (RAG 실패): 새 말풍선 생성
+
+---
+
+### Hybrid Retriever 수정 (`lc/retriever.py`)
+
+#### 1. FAISS dense 점수 0 버그 수정
+- **원인**: `FAISS.from_texts(..., normalize_L2=True)` → `add_texts()` (정규화 없음) 혼용으로 벡터 크기 불일치 → L2 거리 폭증 → relevance score 음수 → dense 배열 max = 0.0
+- **수정**: `encode_kwargs={"normalize_embeddings": True}` 추가 → 임베딩 단계에서 일괄 정규화, FAISS 인덱스 재빌드 필요
+- **결과**: `dense_hi` 0.0 → 0.487로 정상화
+
+#### 2. dense 깨짐 시 sparse fallback
+```python
+if self.norm_bounds["dense_hi"] <= self.norm_bounds["dense_lo"]:
+    return norm_sparse  # dense 사용 불가 시 sparse만으로 scoring
+```
+
+#### 3. BM25 소문자 정규화
+```python
+self.bm25 = BM25Retriever.from_texts(
+    passages, k=TOP_K,
+    preprocess_func=lambda t: t.lower().split(),
+)
+```
+- 기존 BM25는 대소문자 구분 → "jrpg" 쿼리가 "JRPG" 패시지를 매칭 못 함
+- 소문자 통일로 영어 약어 쿼리 매칭 개선
+
+#### 4. Calibration 도메인 불일치 수정
+- **원인**: relevant 샘플 80개 전부 KorQuAD(한국어 Wikipedia) 질문 → ragdata(게임 도메인) 쿼리의 sparse 점수가 상대적으로 낮아 threshold 초과 불가
+- **수정**: KorQuAD 40개 + ragdata 40개 (50:50) 샘플링
+- ragdata 질문 소스: `ragdata/**/*.md`의 `##`, `###` 헤딩 추출 (171개)
+- ragdata 경로 버그도 함께 수정 (`CACHE_DIR.parent.parent.parent` → `.parent.parent`)
+
+#### 5. Cross-Encoder 제거
+- `best_match()` 단순화: hybrid 점수 최고 패시지 직접 반환
+- Cross-Encoder(`bongsoo/klue-cross-encoder-v1`)가 짧은 영어 약어 쿼리("rpg", "jrpg")에서 오히려 품질 저하 유발
+- 향후 긴 자연어 질문 도메인에서는 재활성화 가능
+
+---
+
+### 임계값 조정 (`app/state.py`)
+
+```python
+GRAPH_SIM_THRESHOLD = [0.25, 0.2, 0.15]   # 기존 [0.515, 0.35, 0.25]
+```
+- hybrid 점수 특성상 0.515는 게임 도메인 단어 쿼리에서 절대 도달 불가
+- 재시도 3회(retry_count 0→1→2)에 따라 임계값을 단계적으로 완화
+
+---
+
+## 2026-07-02 — LangGraph Claude 파이프라인 + UI LangGraph 모드 + 전역 예외 처리
+
+### `lg/state.py` → `lg/models.py` 이름 변경
+
+- TypedDict 이름이 `GraphState`인데 파일명이 `state.py`이면 FastAPI의 `state.py`(전역 상태)와 혼동 우려
+- `lg/models.py`로 이름 변경, `nodes.py`·`graph.py`의 import 경로 일괄 수정
+
+### LangGraph Claude 버전 파이프라인 (`source/lg/`)
+
+**`nodes.py`** — Claude 전용 노드 팩토리 2개 추가:
+
+| 팩토리 | 역할 |
+|---|---|
+| `make_generate_claude_context_node()` | RAG 경로: 검색 문서를 컨텍스트로 Claude에 질문 |
+| `make_generate_claude_direct_node()` | 직접 경로: 문서 없이 Claude에 직접 질문 |
+
+**`graph.py`** — `build_claude_graph(retriever, threshold)` 추가:
+- SOP_GPT 그래프와 동일한 retrieve → grade → retry 루프 구조
+- `generate_span` 노드 → `make_generate_claude_context_node()`, `generate_direct` 노드 → `make_generate_claude_direct_node()`
+- `span_extractor_fn`, `qa_llm` 파라미터 불필요 — Claude 노드가 내부적으로 Claude API 호출
+
+**`app/state.py`**:
+- `GRAPH_SIM_THRESHOLD = [0.515, 0.35, 0.25]` — retry_count 0/1/2에 대응하는 단계별 임계값
+- `claude_graph = build_claude_graph(lc_retriever, GRAPH_SIM_THRESHOLD)` 추가
+- `total_count = 8` (기존 7 → 8, claude_graph 빌드 단계 추가)
+
+### 스트리밍 + 엔드포인트 추가
+
+**`streaming.py`** — `sop_lg_stream(graph, question)` 추가:
+- `graph.stream()` 를 별도 스레드에서 실행, `Queue`로 청크를 비동기 루프에 전달
+- 청크 노드 이름으로 이벤트 분기: `retrieve` → `status`, `increment_retry` → `status + 재시도 횟수`, `generate_span` → `rag_context + text`, `generate_direct` → `text`
+
+**`routers/chat.py`** — non-streaming 엔드포인트 2개 추가:
+- `POST /chat/langgraph` — `state.lg_graph.invoke()` 실행
+- `POST /chat/claude/langgraph` — `state.claude_graph.invoke()` 실행
+
+**`routers/stream.py`** — SSE 엔드포인트 2개 추가:
+- `POST /chat/langgraph/stream`
+- `POST /chat/claude/langgraph/stream`
+
+**`ui.py`** — LangGraph 모드 카드 추가:
+- 모드 카드 3개 → 4개: 기본 모델 / RAG / LangChain / LangGraph
+- `CLAUDE_MAP`에 `langgraph: 'claude/langgraph'` 매핑 추가
+- `status` 이벤트 처리: "검색 중...", "재시도 중... (N)" 상태 메시지를 로딩 버블에 표시
+
+### 전역 예외 처리 추가
+
+서버가 내부 오류로 죽는 대신 에러 메시지를 UI에 텍스트로 표시하도록 4개 파일에 예외 처리 추가.
+
+**`source/lc/claude_llm.py`** — `_error_message()` 헬퍼 추가, 세 함수 모두 적용:
+
+| 예외 | 메시지 |
+|---|---|
+| `AuthenticationError` (401) | API 키가 유효하지 않습니다 |
+| `RateLimitError` (429) | 사용량 한도 초과, 잠시 후 재시도 |
+| `APIStatusError` (402) | 크레딧 소진, Console에서 충전 필요 |
+| `APIConnectionError` | 서버 연결 불가 |
+| 기타 `APIStatusError` | HTTP 상태 코드 포함 안내 |
+
+- `ask_claude`, `ask_claude_with_context`: try/except → 에러 문자열 반환
+- `stream_claude`: async generator 전체를 try/except → 에러 문자열 yield
+
+**`source/app/routers/chat.py`** — 모든 엔드포인트 try/except 추가:
+- chain/graph 호출 실패 시 500 에러 대신 `ChatResponse(answer="[오류] ...")` 반환
+- `_ERR_SOP`, `_ERR_RAG`, `_ERR_GRAPH` 세 가지 상황별 메시지 상수 정의
+
+**`source/app/streaming.py`** — SSE 스트림 중간 예외 처리:
+- `sop_rag_stream`: 전체 함수를 try/except로 감싸 에러 SSE 이벤트 후 done 전송
+- `sop_lg_stream`: 스레드 내 예외를 `Queue`로 전달 → 메인 루프에서 `isinstance(chunk, Exception)` 체크 후 에러 이벤트 yield
+
+**`source/lc/llm.py`** — PyTorch 추론 실패 처리:
+- `_call()`, `stream_tokens()` 모두 try/except 추가
+- `torch.cuda.OutOfMemoryError` 별도 분기 → "GPU 메모리 부족" 메시지
+- 기타 예외 → 예외 클래스명 포함 안내
+
+**`source/lc/retriever.py`** — `norm_bounds` None 가드:
+- `_hybrid_scores()`에서 `calibrate()` 미호출 시 KeyError 대신 명확한 `RuntimeError` 발생
 
 ---
 
@@ -150,9 +344,9 @@
 - routing 임계값(`score >= 0.515`) 판단에는 calibrated hybrid 점수를 그대로 유지 — Cross-Encoder 점수로 최적 청크만 교체하고 점수 스케일은 변경하지 않아 임계값 재보정 불필요
 - `.cache/` 전체 삭제 → 다음 서버 기동 시 새 ragdata 포함해 재빌드
 
-### DPO 학습 단계 추가 (`train_all.sh`, `source/model/main.py`)
+### DPO 학습 단계 추가 (`source/model/main.py`)
 
-- `train_all.sh`에 **Stage 5 (train_dpo)** 추가: Stage 4 완료 후 DPO 선호 학습 자동 실행
+- `main.py`에 **Stage 5 (train_dpo)** 추가: Stage 4 완료 후 DPO 선호 학습 실행
 - DPO(Direct Preference Optimization): 정답 응답(chosen)과 오답 응답(rejected)의 확률 비를 최대화하는 방식으로 모델이 선호하는 응답 방향을 조정
   - rejected 쌍은 배치 내 circular-shift로 생성
   - `loss = -log σ(β*(log π_chosen - log π_rejected - log π_ref_chosen + log π_ref_rejected))`
@@ -196,7 +390,6 @@
 - **모델 하이퍼파라미터 확장**: `n_embd 256→512`, `n_head 4→8`, `n_layer 6→12`, `block_size 128→256` — 파라미터 수 약 600만 → 약 5천만으로 증가
 - **RAM 절감 학습 최적화**: `batch_size 64→16` + `gradient accumulation(accum_steps=4)` — 유효 배치 크기(64) 유지하면서 활성화 메모리 4배 절감
 - **데이터 파이프라인 메모리 최적화**: `chatbot_text * 15` 문자열 업샘플링 → 텐서 인코딩 후 `tensor.repeat(15)` 로 변경 — Python 리스트(토큰당 ~28B) 중간 복사본 제거로 피크 RAM 대폭 감소, 인코딩 후 즉시 `del` + `gc.collect()` 적용
-- **순차 학습 스크립트 `train_all.sh`**: Stage 1 → Stage 2 → Stage 4를 하나의 스크립트로 순차 실행, 타임스탬프 포함 로그 기록. `caffeinate -w PID`로 맥북 뚜껑 닫은 상태에서도 학습 유지
 - **재학습 결과**:
   - Stage 1 (이어쓰기): val loss **3.355** (step 3860 early stop)
   - Stage 2 (Q&A): val loss **2.657** (step 1280 early stop)
@@ -319,6 +512,14 @@
 ---
 
 ## 회고
+
+<details>
+<summary><b>2026-07-02 — 구조는 같고, 엔진만 바꾼다</b></summary>
+
+- **Claude 그래프를 SOP_GPT 그래프와 동일한 구조로 만들면서, 노드 팩토리 패턴이 "교체 가능성"을 실현한다는 걸 체감했다.** retrieve → grade → retry 루프를 그대로 두고 generate 노드만 Claude 버전으로 갈아끼웠다. 구조를 바꾸지 않고 동작을 바꾸는 것, 그게 팩토리 패턴의 존재 이유였다.
+- **retry_count에 따라 임계값을 `[0.515, 0.35, 0.25]`로 단계적으로 낮추는 방식이 직관적이었다.** 처음 검색에서 못 찾으면 기준을 조금씩 낮춰 재시도하는 로직인데, `min(retry_count, len-1)`으로 인덱스를 고정하면 횟수가 많아도 마지막 임계값을 넘지 않는다. 단순한 구조인데 안전하게 동작한다.
+
+</details>
 
 <details>
 <summary><b>2026-07-01 — 분리가 유지보수를 만든다</b></summary>

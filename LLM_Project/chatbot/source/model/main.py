@@ -1,9 +1,17 @@
+import builtins
 import gc
 import os
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 import torch
+
+_orig_print = builtins.print
+def _tprint(*args, **kwargs):
+    ts = datetime.now().strftime("%y-%m-%d %H:%M:%S")
+    _orig_print(f"[{ts}]", *args, **kwargs)
+builtins.print = _tprint
 
 from chat import chat, chat_qa, chat_span
 from model import device, steps, lr, batch_size, SOP_GPT, SOP_GPT_Span, block_size
@@ -39,9 +47,9 @@ FT_STEPS = 3000
 FT_LR = 3e-4
 FT_ACCUM_STEPS = 8           # batch_size=8 × accum=8 → 유효 배치 64
 
-SPAN_STEPS = 3000
+SPAN_STEPS = 6000
 SPAN_LR = 3e-4
-SPAN_BATCH_SIZE = 32
+SPAN_BATCH_SIZE = 8
 
 DPO_CKPT = "SOP_GPT_dpo.pt"
 DPO_STEPS = 1000
@@ -157,6 +165,8 @@ def _span_batch(examples, batch_size_n):
 def train_stage4(model):
     """Stage 4: KorQuAD로 추출형 QA(정답 시작/끝 토큰 위치 분류) 학습.
     생성 대신 분류라서 자기회귀 오류가 누적되지 않고, 작은 모델로도 정확한 정답 위치를 찾을 수 있다."""
+    gc.collect()
+    torch.mps.empty_cache()
     examples = rag.build_span_examples()
     random.Random(42).shuffle(examples)
     n_train = int(0.9 * len(examples))
@@ -184,8 +194,8 @@ def train_stage4(model):
             model.eval()
             with torch.no_grad():
                 val_loss = sum(
-                    model(*_span_batch(val_examples, SPAN_BATCH_SIZE))[2].item() for _ in range(20)
-                ) / 20
+                    model(*_span_batch(val_examples, SPAN_BATCH_SIZE))[2].item() for _ in range(5)
+                ) / 5
             model.train()
             print(f"step {step:5d}  lr {cur_lr:.2e}  train {loss.item():.3f}  val {val_loss:.3f}", flush=True)
             if val_loss < best_val - EARLY_STOP_MIN_DELTA:

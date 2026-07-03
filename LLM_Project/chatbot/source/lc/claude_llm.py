@@ -1,25 +1,45 @@
 """Anthropic Claude API를 이용한 답변 생성 함수."""
 
 import os
+from typing import AsyncGenerator, Callable
+
 import anthropic
 from anthropic import AsyncAnthropic
+from lc.retriever import HybridRetriever
 
 MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 512
+MAX_TOKENS = 128
 
 
 def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 
+def _error_message(e: Exception) -> str:
+    if isinstance(e, anthropic.AuthenticationError):
+        return "[오류] API 키가 유효하지 않습니다."
+    if isinstance(e, anthropic.RateLimitError):
+        return "[오류] 사용량 한도를 초과했습니다. 잠시 후 다시 시도해주세요."
+    if isinstance(e, anthropic.APIStatusError) and e.status_code == 402:
+        return "[오류] Claude API 크레딧이 소진됐습니다. Anthropic Console에서 충전해주세요."
+    if isinstance(e, anthropic.APIConnectionError):
+        return "[오류] Claude API 서버에 연결할 수 없습니다."
+    if isinstance(e, anthropic.APIStatusError):
+        return f"[오류] Claude API 오류가 발생했습니다. (HTTP {e.status_code})"
+    return f"[오류] 알 수 없는 오류가 발생했습니다. ({e})"
+
+
 def ask_claude(question: str) -> str:
     """RAG 없이 Claude가 직접 답변."""
-    msg = _client().messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": question}],
-    )
-    return msg.content[0].text
+    try:
+        msg = _client().messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[{"role": "user", "content": question}],
+        )
+        return msg.content[0].text
+    except Exception as e:
+        return _error_message(e)
 
 
 def ask_claude_with_context(question: str, context: str) -> str:
@@ -29,15 +49,18 @@ def ask_claude_with_context(question: str, context: str) -> str:
         f"참고: {context}\n\n"
         f"질문: {question}"
     )
-    msg = _client().messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text
+    try:
+        msg = _client().messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text
+    except Exception as e:
+        return _error_message(e)
 
 
-async def stream_claude(question: str, context: str = ""):
+async def stream_claude(question: str, context: str = "") -> AsyncGenerator[str, None]:
     """Claude 응답을 토큰 단위로 스트리밍. 매 yield마다 현재까지 누적된 전체 텍스트를 반환."""
     if context:
         prompt = (
@@ -48,18 +71,21 @@ async def stream_claude(question: str, context: str = ""):
     else:
         prompt = question
 
-    accumulated = ""
-    async with AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"]).messages.stream(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-    ) as stream:
-        async for text in stream.text_stream:
-            accumulated += text
-            yield accumulated
+    try:
+        accumulated = ""
+        async with AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"]).messages.stream(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            async for text in stream.text_stream:
+                accumulated += text
+                yield accumulated
+    except Exception as e:
+        yield _error_message(e)
 
 
-def build_claude_rag_chain(retriever, threshold: float):
+def build_claude_rag_chain(retriever: HybridRetriever, threshold: float) -> Callable[[str], dict]:
     """retriever로 문서를 검색하고, 점수에 따라 Claude에게 컨텍스트 제공 여부를 결정."""
     def retrieve_and_answer(question: str) -> dict:
         context, score = retriever.best_match(question)
@@ -69,3 +95,54 @@ def build_claude_rag_chain(retriever, threshold: float):
         answer = ask_claude(question)
         return {"answer": answer, "retrieved_context": "", "used_rag": False}
     return retrieve_and_answer
+
+
+def build_claude_langgraph(retriever: HybridRetriever, threshold: list[float]) -> Callable[[str], dict]:
+    """retriever로 문서를 검색하고, 점수에 따라 Claude에게 컨텍스트 제공 여부를 결정."""
+    def retrieve_and_answer(question: str) -> dict:
+        context, score = retriever.best_match(question)
+        if score >= threshold:
+            answer = ask_claude_with_context(question, context)
+            return {"answer": answer, "retrieved_context": context, "used_rag": True}
+        answer = ask_claude(question)
+        return {"answer": answer, "retrieved_context": "", "used_rag": False}
+    return retrieve_and_answer
+
+
+AGENT_TOOLS = [
+    {
+        "name": "search_knowledge_base",
+        "description": (
+            "한국어 지식 베이스(KorQuAD 기반) 및 ragdata를 검색합니다. "
+            "역사, 지리, 과학, 문화, 인물 등 사실 정보 질문에 사용하세요. "
+            "일상 대화나 의견·추론 질문은 도구 없이 직접 답변하세요."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "검색할 질문 (한국어)"}
+            },
+            "required": ["query"]
+        }
+    }
+]
+
+AGENT_SYSTEM = (
+    "당신은 한국어 질의응답 도우미입니다.\n"
+    "역사, 지리, 과학, 문화, 인물 등 사실 확인이 필요한 질문은 "
+    "search_knowledge_base 도구로 지식 베이스를 검색하세요.\n"
+    "일상 대화, 추론, 의견처럼 사실 검색이 불필요한 경우엔 도구 없이 직접 답변하세요.\n"
+    "답변은 한국어로 간결하게 작성하세요."
+)
+
+def call_claude_agent_sync(messages: list) -> object:
+    try:
+        return _client().messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=AGENT_SYSTEM,
+            tools=AGENT_TOOLS,
+            messages=messages,
+        )
+    except Exception as e:
+        return _error_message(e)

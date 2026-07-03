@@ -184,6 +184,11 @@ _HTML = """<!DOCTYPE html>
           <h3>LangChain 기반 검색</h3>
           <p>BM25 + FAISS 하이브리드 검색 후 답변합니다.</p>
         </div>
+        <div class="mode-card" onclick="startChat('langgraph', 'LangGraph 기반 검색')">
+          <div class="icon">🔄</div>
+          <h3>LangGraph 기반 검색</h3>
+          <p>그래프 파이프라인으로 검색·재시도·생성을 처리합니다.</p>
+        </div>
       </div>
     </div>
 
@@ -215,7 +220,7 @@ _HTML = """<!DOCTYPE html>
     let currentMode = '';
     let pendingCount = 0;
 
-    const CLAUDE_MAP = { basic: 'claude/basic', rag: 'claude/rag', langchain: 'claude/langchain' };
+    const CLAUDE_MAP = { basic: 'claude/basic', rag: 'claude/rag', langchain: 'claude/langchain', langgraph: 'claude/langgraph' };
 
     function startChat(mode, title) {
       currentMode = mode;
@@ -274,7 +279,9 @@ _HTML = """<!DOCTYPE html>
 
     async function streamPanelWith(endpoint, question, containerId, msgClass) {
       const box = document.getElementById(containerId);
-      const div = addMsg(containerId, 'assistant loading', '생성 중…');
+      const statusDiv = addMsg(containerId, 'assistant loading', '생성 중…');
+      let answerDiv = null;
+      let hadStatus = false;
 
       try {
         const res = await fetch(endpoint, {
@@ -296,9 +303,19 @@ _HTML = """<!DOCTYPE html>
           for (const part of parts) {
             if (!part.startsWith('data: ')) continue;
             const evt = JSON.parse(part.slice(6));
-            if (evt.type === 'text') {
-              div.textContent = evt.text || '(빈 응답)';
-              div.className = 'msg ' + msgClass;
+            if (evt.type === 'status') {
+              hadStatus = true;
+              statusDiv.textContent = evt.text;
+              box.scrollTop = box.scrollHeight;
+            } else if (evt.type === 'text') {
+              statusDiv.textContent = evt.text || '(빈 응답)';
+              statusDiv.className = 'msg ' + msgClass;
+              box.scrollTop = box.scrollHeight;
+            } else if (evt.type === 'text_fallback') {
+              if (answerDiv === null) {
+                answerDiv = addMsg(containerId, msgClass, '');
+              }
+              answerDiv.textContent = evt.text || '(빈 응답)';
               box.scrollTop = box.scrollHeight;
             } else if (evt.type === 'rag_context') {
               addLabel(containerId, '참고: ' + evt.text);
@@ -306,8 +323,8 @@ _HTML = """<!DOCTYPE html>
           }
         }
       } catch (e) {
-        div.textContent = '오류가 발생했습니다.';
-        div.className = 'msg ' + msgClass;
+        statusDiv.textContent = '오류가 발생했습니다.';
+        statusDiv.className = 'msg ' + msgClass;
       } finally {
         pendingCount--;
         if (pendingCount === 0) {
