@@ -27,12 +27,35 @@ _HTML = """<!DOCTYPE html>
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 32px;
+      gap: 28px;
       padding: 32px 24px;
       text-align: center;
     }
     #select-view h1 { font-size: 26px; font-weight: 700; }
-    #select-view p { color: #666; font-size: 14px; }
+    #select-view > p { color: #666; font-size: 14px; }
+
+    /* ── ID 입력 ── */
+    .id-section {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+    .id-section label { font-size: 13px; font-weight: 600; color: #444; }
+    .id-section input {
+      padding: 10px 20px;
+      border: 1.5px solid #d0d0d0;
+      border-radius: 24px;
+      font-size: 14px;
+      outline: none;
+      width: 280px;
+      text-align: center;
+      font-family: monospace;
+      letter-spacing: 0.03em;
+    }
+    .id-section input:focus { border-color: #2563eb; }
+    .id-error { font-size: 12px; color: #ef4444; display: none; }
+
     .mode-cards { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
     .mode-card {
       width: 210px;
@@ -74,7 +97,8 @@ _HTML = """<!DOCTYPE html>
       border-radius: 6px;
     }
     .back-btn:hover { background: #f0f0f0; }
-    #chat-title { font-size: 15px; font-weight: 600; }
+    #chat-title { font-size: 15px; font-weight: 600; flex: 1; }
+    #chat-user-id { font-size: 11px; color: #aaa; font-family: monospace; }
 
     /* ── 분할 화면 ── */
     .split-container { flex: 1; display: flex; overflow: hidden; }
@@ -118,6 +142,7 @@ _HTML = """<!DOCTYPE html>
     .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #e5e5e5; border-bottom-left-radius: 4px; }
     .msg.assistant.claude-msg { border-color: #ddd5fe; }
     .msg.loading   { color: #aaa; font-style: italic; }
+    .msg.history   { opacity: 0.75; }
     .rag-label {
       align-self: flex-start;
       font-size: 10px;
@@ -166,8 +191,18 @@ _HTML = """<!DOCTYPE html>
     <div id="select-view">
       <div>
         <h1>SOP_GPT 한국어 챗봇</h1>
-        <p style="margin-top:8px">검색 방식을 선택하세요 (왼쪽 SOP_GPT / 오른쪽 Claude)</p>
       </div>
+
+      <div class="id-section">
+        <label>사용자 ID</label>
+        <input id="user-id-input" placeholder="ID를 입력하세요" autocomplete="off" autocorrect="off" spellcheck="false">
+        <span class="id-error" id="id-error">ID를 입력해주세요.</span>
+      </div>
+
+      <div>
+        <p style="color:#666; font-size:13px;">검색 방식을 선택하세요 (왼쪽 SOP_GPT / 오른쪽 Claude)</p>
+      </div>
+
       <div class="mode-cards">
         <div class="mode-card" onclick="startChat('basic', '기본 모델')">
           <div class="icon">💬</div>
@@ -197,6 +232,7 @@ _HTML = """<!DOCTYPE html>
       <div class="chat-header">
         <button class="back-btn" onclick="goBack()">← 뒤로</button>
         <span id="chat-title">채팅</span>
+        <span id="chat-user-id"></span>
       </div>
       <div class="split-container">
         <div class="split-panel">
@@ -218,25 +254,81 @@ _HTML = """<!DOCTYPE html>
 
   <script>
     let currentMode = '';
+    let currentUserId = '';
+    let currentEffectiveId = '';
     let pendingCount = 0;
+
+    // 단기 메모리: effectiveId → {sop: innerHTML, claude: innerHTML}
+    const sessionCache = new Map();
 
     const CLAUDE_MAP = { basic: 'claude/basic', rag: 'claude/rag', langchain: 'claude/langchain', langgraph: 'claude/langgraph' };
 
-    function startChat(mode, title) {
+    async function startChat(mode, title) {
+      const userId = document.getElementById('user-id-input').value.trim().toLowerCase();
+      if (!userId) {
+        document.getElementById('id-error').style.display = 'block';
+        document.getElementById('user-id-input').focus();
+        return;
+      }
+      document.getElementById('id-error').style.display = 'none';
+      document.getElementById('user-id-input').value = userId;
+
+      const effectiveId = userId + '_' + mode;
+      const isNewSession = currentEffectiveId !== effectiveId;
+
+      // 다른 세션으로 전환 전, 현재 DOM을 캐시에 저장
+      if (isNewSession && currentEffectiveId) {
+        sessionCache.set(currentEffectiveId, {
+          sop:    document.getElementById('messages-sop').innerHTML,
+          claude: document.getElementById('messages-claude').innerHTML,
+        });
+      }
+
       currentMode = mode;
+      currentUserId = userId;
+      currentEffectiveId = effectiveId;
+
       document.getElementById('chat-title').textContent = title;
-      document.getElementById('messages-sop').innerHTML = '';
-      document.getElementById('messages-claude').innerHTML = '';
+      document.getElementById('chat-user-id').textContent = 'ID: ' + effectiveId;
       document.getElementById('select-view').style.display = 'none';
       document.getElementById('chat-view').style.display = 'flex';
       document.getElementById('chat-view').style.flexDirection = 'column';
+
+      if (isNewSession) {
+        const cached = sessionCache.get(effectiveId);
+        if (cached) {
+          // 단기 캐시 복원
+          document.getElementById('messages-sop').innerHTML = cached.sop;
+          document.getElementById('messages-claude').innerHTML = cached.claude;
+        } else {
+          document.getElementById('messages-sop').innerHTML = '';
+          document.getElementById('messages-claude').innerHTML = '';
+          await loadHistory(effectiveId, mode);  // 장기 메모리(JSON) 복원
+        }
+      }
+
       document.getElementById('msg-input').focus();
     }
 
     function goBack() {
       document.getElementById('select-view').style.display = 'flex';
       document.getElementById('chat-view').style.display = 'none';
-      currentMode = '';
+    }
+
+    async function loadHistory(threadId, mode) {
+      try {
+        const m = mode || 'langgraph';
+        const [sopData, claudeData] = await Promise.all([
+          fetch(`/chat/${m}/history?thread_id=${encodeURIComponent(threadId)}`).then(r => r.json()),
+          fetch(`/chat/claude/${m}/history?thread_id=${encodeURIComponent(threadId)}`).then(r => r.json()),
+        ]);
+        for (const msg of (sopData.messages || [])) {
+          addMsg('messages-sop', msg.role === 'user' ? 'user' : 'assistant history', msg.content);
+        }
+        for (const msg of (claudeData.messages || [])) {
+          addMsg('messages-claude', msg.role === 'user' ? 'user' : 'assistant claude-msg history', msg.content);
+        }
+      } catch (_) {}
     }
 
     function addMsg(containerId, cls, text) {
@@ -281,13 +373,12 @@ _HTML = """<!DOCTYPE html>
       const box = document.getElementById(containerId);
       const statusDiv = addMsg(containerId, 'assistant loading', '생성 중…');
       let answerDiv = null;
-      let hadStatus = false;
 
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ question, thread_id: currentEffectiveId || null }),
         });
 
         const reader = res.body.getReader();
@@ -304,7 +395,6 @@ _HTML = """<!DOCTYPE html>
             if (!part.startsWith('data: ')) continue;
             const evt = JSON.parse(part.slice(6));
             if (evt.type === 'status') {
-              hadStatus = true;
               statusDiv.textContent = evt.text;
               box.scrollTop = box.scrollHeight;
             } else if (evt.type === 'text') {
@@ -336,6 +426,9 @@ _HTML = """<!DOCTYPE html>
 
     document.getElementById('msg-input').addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) send();
+    });
+    document.getElementById('user-id-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') document.querySelector('.mode-card:last-child').click();
     });
   </script>
 </body>

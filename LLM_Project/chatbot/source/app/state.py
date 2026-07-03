@@ -11,6 +11,8 @@ from lc.retriever import build_hybrid_retriever
 from lc.claude_llm import build_claude_rag_chain
 from rag.rag import build_tfidf_retriever
 from lg.graph import build_graph, build_claude_graph
+from langgraph.checkpoint.memory import MemorySaver
+import json
 
 MODEL_DIR = Path(__file__).resolve().parent.parent / "model"
 
@@ -21,7 +23,8 @@ SPAN_CKPT = MODEL_DIR / "SOP_GPT_span.pt"
 
 RAG_SIM_THRESHOLD   = 0.515   # BM25+FAISS 하이브리드 임계값
 TFIDF_SIM_THRESHOLD = 0.25    # TF-IDF 단독 임계값
-GRAPH_SIM_THRESHOLD = [0.25, 0.2, 0.15]
+GRAPH_SOP_THRESHOLD    = [0.35, 0.25, 0.2]   # SOP 모델: RAG 의존도 높으므로 낮게
+GRAPH_CLAUDE_THRESHOLD = [0.515, 0.4, 0.3]  # Claude: 자체 생성 능력 있으므로 높게
 
 now_count   = 0
 total_count = 7
@@ -93,14 +96,49 @@ claude_lc_chain    = build_claude_rag_chain(lc_retriever,    RAG_SIM_THRESHOLD)
 # ── LangGraph 파이프라인 ────────────────────────────────────────────────────────
 total_count = 8
 
+_data_dir = Path(__file__).resolve().parent.parent / "data"
+_history_dir = _data_dir / "history"
+_history_dir.mkdir(parents=True, exist_ok=True)
+
+
+def load_history(thread_id: str) -> list:
+    """저장된 JSON 히스토리 반환. 없으면 빈 리스트."""
+    path = _history_dir / f"{thread_id}.json"
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_history(thread_id: str, messages: list) -> None:
+    """LangGraph용: MemorySaver 전체 메시지 리스트를 저장. 세션 내 누적이 더 길면 덮어쓰기."""
+    _history_dir.mkdir(parents=True, exist_ok=True)
+    path = _history_dir / f"{thread_id}.json"
+    existing = load_history(thread_id)
+    to_save = messages if len(messages) >= len(existing) else existing + messages
+    path.write_text(json.dumps(to_save, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_history(thread_id: str, new_messages: list) -> None:
+    """Basic/RAG/LangChain용: 기존 히스토리에 새 메시지 이어붙이기."""
+    _history_dir.mkdir(parents=True, exist_ok=True)
+    existing = load_history(thread_id)
+    path = _history_dir / f"{thread_id}.json"
+    path.write_text(json.dumps(existing + new_messages, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 now_count += 1
 print(f"[{now_count}/{total_count}] LangGraph 파이프라인 빌드 중...")
-lg_graph = build_graph(lc_retriever, qa_llm, span_extractor_fn, GRAPH_SIM_THRESHOLD)
+lg_graph = build_graph(lc_retriever, qa_llm, span_extractor_fn, GRAPH_SOP_THRESHOLD,
+                       checkpointer=MemorySaver())
 print(f"[{now_count}/{total_count}] LangGraph 파이프라인 빌드 완료.")
 
 now_count += 1
 print(f"[{now_count}/{total_count}] Claude LangGraph 파이프라인 빌드 중...")
-claude_graph = build_claude_graph(lc_retriever, GRAPH_SIM_THRESHOLD)
+claude_graph = build_claude_graph(lc_retriever, GRAPH_CLAUDE_THRESHOLD,
+                                  checkpointer=MemorySaver())
 print(f"[{now_count}/{total_count}] Claude LangGraph 파이프라인 빌드 완료.")
 
 print("=" * 40)

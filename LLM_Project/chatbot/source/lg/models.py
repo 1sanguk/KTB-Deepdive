@@ -1,4 +1,5 @@
-from typing import TypedDict
+import operator
+from typing import Annotated, TypedDict
 
 
 class GraphState(TypedDict):
@@ -10,6 +11,7 @@ class GraphState(TypedDict):
     answer: str          # 최종 생성 답변
     used_rag: bool       # grade 노드가 설정하는 RAG 경로 사용 여부
     retry_count: int     # increment_retry 노드가 올리는 현재 재시도 횟수
+    messages: Annotated[list[dict], operator.add]  # 대화 이력 누적 (thread_id 기반 메모리)
 
 
 class AgentState(TypedDict):

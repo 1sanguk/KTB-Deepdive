@@ -59,7 +59,9 @@ async def sop_rag_stream(
         yield _sse({"type": "text", "text": f"[오류] 처리 중 오류가 발생했습니다. ({type(e).__name__})"})
         yield _sse({"type": "done"})
 
-async def sop_lg_stream(graph: CompiledStateGraph, question: str) -> AsyncGenerator[str, None]:
+async def sop_lg_stream(graph: CompiledStateGraph, question: str, thread_id: str | None = None) -> AsyncGenerator[str, None]:
+    import state as _state
+    cfg = {"configurable": {"thread_id": thread_id}} if thread_id else {}
     q = queue.Queue()
 
     def run():
@@ -71,7 +73,8 @@ async def sop_lg_stream(graph: CompiledStateGraph, question: str) -> AsyncGenera
                 'answer': '',
                 'used_rag': False,
                 'retry_count': 0,
-            }):
+                'messages': [],
+            }, config=cfg):
                 q.put(chunk)
         except Exception as e:
             q.put(e)
@@ -93,15 +96,46 @@ async def sop_lg_stream(graph: CompiledStateGraph, question: str) -> AsyncGenera
         elif "increment_retry" in chunk:
             yield _sse({"type": "status", "text": f"재시도 중.... ({chunk['increment_retry']['retry_count']})"})
         elif "generate_span" in chunk:
-            state = chunk['generate_span']
-            if state['documents']:
-                yield _sse({"type": "rag_context", "text": state['documents'][0]})
-            yield _sse({"type": "text", "text": state['answer']})
+            node_state = chunk['generate_span']
+            docs = node_state.get('documents', [])
+            if docs:
+                yield _sse({"type": "rag_context", "text": docs[0]})
+            yield _sse({"type": "text", "text": node_state['answer']})
         elif "generate_direct" in chunk:
             yield _sse({"type": "text_fallback", "text": chunk['generate_direct']['answer']})
 
     yield _sse({"type": "done"})
+
+    # 스트림 완료 후 JSON 파일에 히스토리 저장
+    if thread_id:
+        try:
+            snap = graph.get_state(cfg)
+            if snap and snap.values:
+                _state.save_history(thread_id, snap.values.get("messages", []))
+        except Exception:
+            pass
     
+
+async def with_history(gen: AsyncGenerator[str, None], thread_id: str | None, question: str) -> AsyncGenerator[str, None]:
+    """스트림을 그대로 통과시키되, 완료 후 question+answer를 JSON 파일에 추가."""
+    import state as _state
+    answer = ""
+    async for chunk in gen:
+        yield chunk
+        if not thread_id:
+            continue
+        try:
+            data = json.loads(chunk.removeprefix("data: ").strip())
+            if data.get("type") in ("text", "text_fallback"):
+                answer += data.get("text", "")
+        except Exception:
+            pass
+    if thread_id and answer:
+        _state.append_history(thread_id, [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer},
+        ])
+
 
 async def claude_rag_stream(retriever: Any, threshold: float, question: str) -> AsyncGenerator[str, None]:
     context, score = retriever.best_match(question)

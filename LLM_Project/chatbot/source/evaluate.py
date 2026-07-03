@@ -125,6 +125,7 @@ def run_lg_graph(inputs):
         "answer": "",
         "used_rag": False,
         "retry_count": 0,
+        "messages": [],
     })
     return {"answer": result["answer"]}
 

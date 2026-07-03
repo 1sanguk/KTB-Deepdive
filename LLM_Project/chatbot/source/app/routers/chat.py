@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 import state
 from lc.claude_llm import ask_claude
@@ -50,6 +50,7 @@ def chat_langchain(req: ChatRequest) -> ChatResponse:
 @router.post("/chat/langgraph", response_model=ChatResponse)
 def chat_langgraph(req: ChatRequest) -> ChatResponse:
     try:
+        cfg = {"configurable": {"thread_id": req.thread_id}} if req.thread_id else {}
         result = state.lg_graph.invoke({
             "query": req.question,
             "documents": [],
@@ -57,7 +58,8 @@ def chat_langgraph(req: ChatRequest) -> ChatResponse:
             "answer": "",
             "used_rag": False,
             "retry_count": 0,
-        })
+            "messages": [],
+        }, config=cfg)
         return ChatResponse(
             answer=result["answer"],
             retrieved_context=result["documents"][0] if result["used_rag"] and result["documents"] else "",
@@ -94,6 +96,7 @@ def chat_claude_langchain(req: ChatRequest) -> ChatResponse:
 @router.post("/chat/claude/langgraph", response_model=ChatResponse)
 def chat_claude_langgraph(req: ChatRequest) -> ChatResponse:
     try:
+        cfg = {"configurable": {"thread_id": req.thread_id}} if req.thread_id else {}
         result = state.claude_graph.invoke({
             "query": req.question,
             "documents": [],
@@ -101,7 +104,8 @@ def chat_claude_langgraph(req: ChatRequest) -> ChatResponse:
             "answer": "",
             "used_rag": False,
             "retry_count": 0,
-        })
+            "messages": [],
+        }, config=cfg)
         return ChatResponse(
             answer=result["answer"],
             retrieved_context=result["documents"][0] if result["used_rag"] and result["documents"] else "",
@@ -109,3 +113,59 @@ def chat_claude_langgraph(req: ChatRequest) -> ChatResponse:
         )
     except Exception:
         return ChatResponse(answer=_ERR_GRAPH, retrieved_context="", used_rag=False)
+
+
+@router.get("/chat/basic/history")
+def get_basic_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid)}
+
+@router.get("/chat/claude/basic/history")
+def get_claude_basic_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid + ":c")}
+
+@router.get("/chat/rag/history")
+def get_rag_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid)}
+
+@router.get("/chat/claude/rag/history")
+def get_claude_rag_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid + ":c")}
+
+@router.get("/chat/langchain/history")
+def get_langchain_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid)}
+
+@router.get("/chat/claude/langchain/history")
+def get_claude_langchain_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid + ":c")}
+
+@router.get("/chat/langgraph/history")
+def get_langgraph_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    # MemorySaver에 당세션 데이터 있으면 우선 사용, 없으면 JSON 파일에서 로드
+    try:
+        snap = state.lg_graph.get_state({"configurable": {"thread_id": tid}})
+        if snap and snap.values and snap.values.get("messages"):
+            return {"messages": snap.values["messages"]}
+    except Exception:
+        pass
+    return {"messages": state.load_history(tid)}
+
+
+@router.get("/chat/claude/langgraph/history")
+def get_claude_langgraph_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    claude_tid = tid + ":c"
+    try:
+        snap = state.claude_graph.get_state({"configurable": {"thread_id": claude_tid}})
+        if snap and snap.values and snap.values.get("messages"):
+            return {"messages": snap.values["messages"]}
+    except Exception:
+        pass
+    return {"messages": state.load_history(claude_tid)}

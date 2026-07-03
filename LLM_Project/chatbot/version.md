@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-04 — LangGraph 메모리 시스템 + 전 모드 히스토리 + UI 단기 캐시 + 임계값 분리](#2026-07-04--langgraph-메모리-시스템--전-모드-히스토리--ui-단기-캐시--임계값-분리)
 - [2026-07-03 — Claude Agent + Hybrid Retriever 수정 + RAG 답변 품질 개선](#2026-07-03--claude-agent--hybrid-retriever-수정--rag-답변-품질-개선)
 - [2026-07-02 — LangGraph Claude 파이프라인 + UI LangGraph 모드 + 전역 예외 처리](#2026-07-02--langgraph-claude-파이프라인--ui-langgraph-모드--전역-예외-처리)
 - [2026-07-01 — Claude API 연동 + 스트리밍 + 분할화면 UI + app.py 모듈화 + RPG 문서](#2026-07-01--claude-api-연동--스트리밍--분할화면-ui--apppy-모듈화--rpg-문서)
@@ -12,6 +13,192 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-07-04 — LangGraph 메모리 시스템 + 전 모드 히스토리 + UI 단기 캐시 + 임계값 분리
+
+### 핵심 변경 목적
+
+`langgraph-checkpoint 4.1.1`이 `langgraph 0.2.70`과 API 불일치(`get()` 시그니처 변경)로 `SqliteSaver` 사용 불가. 이를 계기로 단기/장기 메모리 아키텍처를 재설계했다.
+
+---
+
+### 메모리 아키텍처 (`app/state.py`)
+
+| 구분 | 방식 | 범위 |
+|---|---|---|
+| 단기 (서버) | `MemorySaver` (in-process) | 서버 재시작 전까지 AI 컨텍스트 유지 |
+| 단기 (UI) | JS `sessionCache` Map | 페이지 새로고침 전까지 DOM 상태 유지 |
+| 장기 | `data/history/{thread_id}.json` | 서버 재시작 후에도 채팅 이력 표시 |
+
+**`state.py` 추가 함수:**
+
+```python
+def load_history(thread_id: str) -> list:
+    """data/history/{thread_id}.json 읽기. 없으면 []."""
+
+def save_history(thread_id: str, messages: list) -> None:
+    """LangGraph용: MemorySaver 전체 메시지 리스트 저장. 세션 내 누적이 더 길면 덮어쓰기."""
+
+def append_history(thread_id: str, new_messages: list) -> None:
+    """Basic/RAG/LangChain용: 기존 JSON에 새 메시지 이어붙이기."""
+```
+
+- `save_history`: MemorySaver가 세션 내 모든 메시지를 누적하므로, 재시작 후 새 턴이 짧게 오면 `existing + messages`로 이어붙임
+- `append_history`: 매 스트림 완료 후 question+answer 2개를 JSON에 추가
+
+---
+
+### LangGraph 노드 구조 수정 (`lg/graph.py`, `lg/nodes.py`)
+
+**`_init_graph_state` 노드 추가**: 그래프 진입 시 user 메시지를 messages에 추가하는 전용 노드. retry 루프 시 user 메시지 중복 방지.
+
+```
+흐름: init → retrieve → grade → (span | retry→retrieve | direct)
+```
+
+**핵심 수정: 노드 반환값에서 `**state` 제거**
+
+`messages` 필드가 `Annotated[list[dict], operator.add]` reducer를 사용하는데, 모든 노드가 `{**state, ...}` 패턴으로 반환하면 기존 messages 전체가 다시 reducer에 들어가 지수적 중복이 발생했다. 노드는 변경된 필드만 반환해야 한다.
+
+```python
+# 수정 전 (버그)
+def generate_span(state): return {**state, "answer": ans, "messages": [new_msg]}
+
+# 수정 후 (정상)
+def generate_span(state): return {"answer": ans, "messages": [new_msg]}
+```
+
+**`GraphState`에 `messages` 필드 추가** (`lg/models.py`):
+
+```python
+class GraphState(TypedDict):
+    ...
+    messages: Annotated[list[dict], operator.add]
+```
+
+**`build_graph` / `build_claude_graph`에 `checkpointer` 파라미터 추가**:
+```python
+def build_graph(..., checkpointer: Optional[MemorySaver] = None) -> CompiledStateGraph:
+    return graph.compile(checkpointer=checkpointer)
+```
+
+**`_route` 문서 품질 검증 추가** (`lg/graph.py`): `used_rag=True`라도 문서가 빈약(20자 이하)하면 `span`이 아닌 `retry`/`direct`로 돌린다. SOP 모델과 Claude 모두 동일한 `_route` 함수 적용.
+
+```python
+def _route(state: GraphState) -> str:
+    if state['used_rag']:
+        doc = (state.get('documents') or [''])[0].strip()
+        if len(doc) > 20:
+            return "span"
+        return "retry" if state['retry_count'] < MAX_RETRIES else "direct"
+    elif state['retry_count'] < MAX_RETRIES:
+        return "retry"
+    else:
+        return "direct"
+```
+
+- 임계값을 넘어 `used_rag=True`가 됐더라도, 실제 검색 결과 문서가 비어있거나 너무 짧으면 RAG로 답변하지 않고 재시도하거나 직접 생성한다.
+- 처음에 Claude 전용 `_claude_route`를 별도로 만들었으나, SOP 모델에도 동일하게 필요함을 확인 후 `_route` 하나로 통합했다.
+
+---
+
+### 임계값 분리 (`app/state.py`)
+
+```python
+GRAPH_SOP_THRESHOLD    = [0.35, 0.25, 0.2]   # SOP 모델: RAG 의존도 높으므로 낮게
+GRAPH_CLAUDE_THRESHOLD = [0.515, 0.4, 0.3]   # Claude: 자체 생성 능력 있으므로 높게
+```
+
+- SOP 모델은 RAG 없이 단독 답변 품질이 낮으므로 더 넓게 RAG 경로 진입
+- Claude는 자체 지식이 충분하므로 문서가 충분히 관련될 때만 RAG 사용
+
+---
+
+### thread_id 기반 세션 분리 (`app/models.py`)
+
+```python
+class ChatRequest(BaseModel):
+    question: str
+    thread_id: str | None = None
+
+    @field_validator("thread_id")
+    @classmethod
+    def normalize_thread_id(cls, v):
+        return v.strip().lower() if v else None
+```
+
+- UI에서 사용자 ID를 입력받아 `{userId}_{mode}`를 `thread_id`로 사용
+  - 예: `steve_basic`, `steve_langgraph`
+- Claude 엔드포인트는 `thread_id + ":c"` suffix로 SOP 히스토리와 분리
+
+---
+
+### 스트리밍 히스토리 저장 (`app/streaming.py`, `app/routers/stream.py`)
+
+**`with_history()` 래퍼 추가** — basic/rag/langchain 모든 스트림에 적용:
+
+```python
+async def with_history(gen, thread_id, question):
+    answer = ""
+    async for chunk in gen:
+        yield chunk
+        # "text", "text_fallback" 이벤트 텍스트 누적
+    if thread_id and answer:
+        state.append_history(thread_id, [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": answer},
+        ])
+```
+
+**`sop_lg_stream`**: 스트림 완료 후 `graph.get_state()`로 전체 messages 추출 → `save_history()`
+
+**`generate_span` KeyError 수정**:
+- 노드가 `{**state}` 제거 후 `documents`를 반환하지 않아 `node_state['documents']` 에러 발생
+- `node_state.get('documents', [])` 로 수정
+
+---
+
+### 히스토리 엔드포인트 추가 (`app/routers/chat.py`)
+
+```
+GET /chat/basic/history?thread_id=...
+GET /chat/claude/basic/history?thread_id=...
+GET /chat/rag/history?thread_id=...
+GET /chat/claude/rag/history?thread_id=...
+GET /chat/langchain/history?thread_id=...
+GET /chat/claude/langchain/history?thread_id=...
+GET /chat/langgraph/history?thread_id=...        (기존, MemorySaver 우선 → JSON fallback)
+GET /chat/claude/langgraph/history?thread_id=... (기존, MemorySaver 우선 → JSON fallback)
+```
+
+---
+
+### UI 단기 메모리 캐시 (`app/ui.py`)
+
+**`sessionCache` Map 추가**: 모드/ID 전환 시 이전 DOM을 Map에 저장, 복귀 시 복원.
+
+```javascript
+const sessionCache = new Map();  // effectiveId → {sop: innerHTML, claude: innerHTML}
+
+async function startChat(mode, title) {
+  // 전환 전 현재 DOM 저장
+  if (isNewSession && currentEffectiveId)
+    sessionCache.set(currentEffectiveId, { sop: ..., claude: ... });
+
+  // 복귀 시 캐시 복원 (없으면 서버에서 장기 메모리 로드)
+  const cached = sessionCache.get(effectiveId);
+  if (cached) restore(cached);
+  else { clear DOM; await loadHistory(effectiveId, mode); }
+}
+```
+
+**`loadHistory(threadId, mode)`** — 모든 모드에서 호출:
+```javascript
+fetch(`/chat/${mode}/history?thread_id=...`)
+fetch(`/chat/claude/${mode}/history?thread_id=...`)
+```
 
 ---
 

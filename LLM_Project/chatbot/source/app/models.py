@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class GenerateRequest(BaseModel):
@@ -12,6 +12,12 @@ class GenerateResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str
+    thread_id: str | None = None
+
+    @field_validator("thread_id")
+    @classmethod
+    def normalize_thread_id(cls, v: str | None) -> str | None:
+        return v.strip().lower() if v else None
 
 
 class ChatResponse(BaseModel):
