@@ -9,7 +9,7 @@
 
 | 주차 | 주제 | 언어 | 링크 |
 |:----:|------|:----:|:----:|
-| Project | 한국어 Mini-GPT 챗봇 (자체 GPT + RAG + LangChain 풀스택) | LLM | [바로가기](LLM_Project/chatbot/README.md) |
+| Project | 한국어 Mini-GPT 챗봇 (자체 GPT + RAG + LangChain + LangGraph) | LLM | [바로가기](LLM_Project/chatbot/README.md) |
 | 08 | MCP Context Isolation (보안·권한·데이터 오염 문제 분석) | LLM | [바로가기](08/README.md) |
 | 06 | Hybrid Search (Sparse + Dense Vector 검색) | Python | [바로가기](06/README.md) |
 | 05 | 트랜스포머의 위치 인코딩 3가지 비교 | Python | [바로가기](05/README.md) |
@@ -21,14 +21,14 @@
 
 ## 주차별 요약
 
-### LLM_Project — 한국어 Mini-GPT 챗봇 (LangChain RAG)
+### LLM_Project — 한국어 Mini-GPT 챗봇
 
-> 자모(NFD) 단위 BPE 토크나이저부터 GPT 아키텍처, 학습, RAG, LangChain 파이프라인, FastAPI 서빙, LangSmith 트레이싱까지 전부 직접 구현한 한국어 챗봇 프로젝트.
+> 자모(NFD) 단위 BPE 토크나이저부터 GPT 아키텍처, 학습, RAG, LangChain 파이프라인, LangGraph, FastAPI 서빙, LangSmith 트레이싱까지 전부 직접 구현한 한국어 챗봇 프로젝트.
 
 **핵심 결론**
 
 - 직접 구현한 GPT 디코더(~97M params, 12층)를 단계별로 학습: **Stage 1** 이어쓰기 → **Stage 2** Q&A 파인튜닝 → **Stage 4** 추출형 QA(정답 스팬 위치 분류) → **Stage 5** DPO 선호 학습(진행 중)
-- 검색 방식에 따라 **Basic / RAG(TF-IDF) / LangChain(BM25+FAISS 하이브리드)** 3가지 모드를 제공하고, 검색 점수가 임계값 미만이면 Stage 2(잡담형) 모델로, 이상이면 Stage 4(추출형) 모델로 라우팅
+- 검색 방식에 따라 **Basic / RAG(TF-IDF) / LangChain(BM25+FAISS 하이브리드) / LangGraph** 4가지 모드를 제공하고, 검색 점수가 임계값 미만이면 Stage 2(잡담형) 모델로, 이상이면 Stage 4(추출형) 모델로 라우팅
 - 하이브리드 검색(BM25+FAISS) 도입으로 라우팅 정확도가 TF-IDF 단독 73.3% → **82.7%**로 향상 (held-out 검증 기준)
 - **LangGraph**로 별도의 상태 기반(StateGraph) 파이프라인도 구현 — 검색 실패 시 단순 폴백이 아니라 **노드 재시도(retry) 루프**를 거치며, `build_graph`(SOP_GPT) / `build_claude_graph` / `build_claude_agent_graph`(Claude Agent 도구 호출) 3가지 그래프를 노드 팩토리 8개(SOP_GPT 4 + Claude 4)로 조립
 - LangChain LCEL로 체인을 표준화하고 FastAPI + SSE 스트리밍으로 서빙, 동일 검색기를 재사용해 SOP_GPT와 Claude API 응답을 분할화면으로 실시간 비교
