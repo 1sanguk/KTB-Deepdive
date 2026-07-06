@@ -24,3 +24,18 @@ class ChatResponse(BaseModel):
     answer: str
     retrieved_context: str
     used_rag: bool
+
+
+class AuthRequest(BaseModel):
+    user_id: str
+    password: str
+
+    @field_validator("user_id")
+    @classmethod
+    def normalize_user_id(cls, v: str) -> str:
+        return v.strip().lower()
+
+
+class AuthResponse(BaseModel):
+    ok: bool
+    msg: str  # "registered" | "logged_in" | "wrong_password"

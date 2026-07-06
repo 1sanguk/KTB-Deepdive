@@ -109,6 +109,18 @@ source/
 - **결과물**: `SOP_GPT_dpo.pt`
 - 실행: `python main.py train_dpo`
 
+## Phase 11 — 자동 라우팅 + 로그인 시스템 ✅
+
+- **로그인**: ID + 비밀번호 입력 → `/auth/login` 호출 → 신규 ID면 자동 생성, 기존 ID면 비밀번호 검증 (동일 ID + 다른 PWD 불가)
+- **사용자 저장**: `data/users.json`에 `{id: password}` 형태로 영구 저장
+- **자동 라우팅**: Claude Haiku(temperature=0)가 질문을 `chit_chat / factual / general` 세 가지로 분류해 체인을 자동 선택
+  - `chit_chat` → `basic` (검색 불필요)
+  - `factual` → `langgraph` (사실 확인, retry 루프 포함)
+  - `general` → `langchain` (BM25+FAISS 하이브리드 검색)
+- **신규 파일**: `source/app/auth.py`, `source/lc/router.py`
+- **신규 엔드포인트**: `POST /auth/login`, `POST /chat/auto/stream`, `POST /chat/claude/auto/stream`, `GET /chat/auto/history`, `GET /chat/claude/auto/history`
+- **UI 개편**: 모드 카드 선택 화면 → 로그인 화면(ID+PWD), 채팅 화면은 자동 라우팅. 각 응답 버블 위에 라우팅 배지(→ LangGraph 검색 등) 표시
+
 ## 스트레치 골 (여유 있을 때)
 - temperature / top-k / top-p 샘플링
 - KV cache로 생성 속도 개선

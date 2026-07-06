@@ -20,61 +20,74 @@ _HTML = """<!DOCTYPE html>
     }
     .app { width: 100%; max-width: 1100px; display: flex; flex-direction: column; height: 100vh; }
 
-    /* ── 모드 선택 화면 ── */
-    #select-view {
+    /* ── 로그인 화면 ── */
+    #login-view {
       flex: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 28px;
+      gap: 20px;
       padding: 32px 24px;
       text-align: center;
     }
-    #select-view h1 { font-size: 26px; font-weight: 700; }
-    #select-view > p { color: #666; font-size: 14px; }
+    #login-view h1 { font-size: 26px; font-weight: 700; }
+    #login-view > p { color: #666; font-size: 14px; }
 
-    /* ── ID 입력 ── */
-    .id-section {
+    .login-card {
+      background: #fff;
+      border: 1.5px solid #e0e0e0;
+      border-radius: 16px;
+      padding: 36px 40px;
+      width: 360px;
       display: flex;
       flex-direction: column;
-      align-items: center;
-      gap: 8px;
+      gap: 14px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.06);
     }
-    .id-section label { font-size: 13px; font-weight: 600; color: #444; }
-    .id-section input {
-      padding: 10px 20px;
+    .login-card label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #555;
+      text-align: left;
+      margin-bottom: -6px;
+    }
+    .login-card input {
+      padding: 11px 16px;
       border: 1.5px solid #d0d0d0;
-      border-radius: 24px;
+      border-radius: 10px;
       font-size: 14px;
       outline: none;
-      width: 280px;
-      text-align: center;
-      font-family: monospace;
-      letter-spacing: 0.03em;
+      font-family: inherit;
+      transition: border-color 0.15s;
     }
-    .id-section input:focus { border-color: #2563eb; }
-    .id-error { font-size: 12px; color: #ef4444; display: none; }
-
-    .mode-cards { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; }
-    .mode-card {
-      width: 210px;
-      padding: 28px 20px;
-      border: 1.5px solid #e0e0e0;
-      border-radius: 14px;
-      background: #fff;
+    .login-card input:focus { border-color: #2563eb; }
+    .login-btn {
+      margin-top: 4px;
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      background: #2563eb;
+      color: #fff;
+      font-size: 15px;
+      font-weight: 600;
       cursor: pointer;
-      transition: box-shadow 0.15s, transform 0.15s, border-color 0.15s;
-      text-align: left;
+      font-family: inherit;
+      transition: background 0.15s;
     }
-    .mode-card:hover {
-      box-shadow: 0 6px 18px rgba(0,0,0,0.09);
-      transform: translateY(-3px);
-      border-color: #2563eb;
+    .login-btn:hover { background: #1d4ed8; }
+    .login-btn:disabled { background: #93b4f5; cursor: default; }
+    .login-hint {
+      font-size: 12px;
+      color: #aaa;
+      text-align: center;
     }
-    .mode-card .icon { font-size: 28px; margin-bottom: 12px; }
-    .mode-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
-    .mode-card p { font-size: 12px; color: #888; line-height: 1.5; }
+    .login-error {
+      font-size: 12px;
+      color: #ef4444;
+      text-align: center;
+      display: none;
+    }
 
     /* ── 채팅 화면 ── */
     #chat-view { flex: 1; display: none; flex-direction: column; height: 100vh; overflow: hidden; }
@@ -143,6 +156,17 @@ _HTML = """<!DOCTYPE html>
     .msg.assistant.claude-msg { border-color: #ddd5fe; }
     .msg.loading   { color: #aaa; font-style: italic; }
     .msg.history   { opacity: 0.75; }
+    .route-badge {
+      align-self: flex-end;
+      font-size: 10px;
+      color: #2563eb;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 20px;
+      padding: 2px 8px;
+      margin-top: -6px;
+      margin-bottom: 2px;
+    }
     .rag-label {
       align-self: flex-start;
       font-size: 10px;
@@ -187,51 +211,29 @@ _HTML = """<!DOCTYPE html>
 <body>
   <div class="app">
 
-    <!-- 모드 선택 화면 -->
-    <div id="select-view">
+    <!-- 로그인 화면 -->
+    <div id="login-view">
       <div>
         <h1>SOP_GPT 한국어 챗봇</h1>
+        <p style="color:#666; font-size:13px; margin-top:8px;">자동 라우팅 모드 — 질문에 맞는 체인을 자동으로 선택합니다.</p>
       </div>
 
-      <div class="id-section">
-        <label>사용자 ID</label>
-        <input id="user-id-input" placeholder="ID를 입력하세요" autocomplete="off" autocorrect="off" spellcheck="false">
-        <span class="id-error" id="id-error">ID를 입력해주세요.</span>
-      </div>
-
-      <div>
-        <p style="color:#666; font-size:13px;">검색 방식을 선택하세요 (왼쪽 SOP_GPT / 오른쪽 Claude)</p>
-      </div>
-
-      <div class="mode-cards">
-        <div class="mode-card" onclick="startChat('basic', '기본 모델')">
-          <div class="icon">💬</div>
-          <h3>기본 모델</h3>
-          <p>검색 없이 직접 답변합니다.</p>
-        </div>
-        <div class="mode-card" onclick="startChat('rag', 'RAG 기반 검색')">
-          <div class="icon">🔍</div>
-          <h3>RAG 기반 검색</h3>
-          <p>TF-IDF로 관련 문서를 검색한 뒤 답변합니다.</p>
-        </div>
-        <div class="mode-card" onclick="startChat('langchain', 'LangChain 기반 검색')">
-          <div class="icon">⚡</div>
-          <h3>LangChain 기반 검색</h3>
-          <p>BM25 + FAISS 하이브리드 검색 후 답변합니다.</p>
-        </div>
-        <div class="mode-card" onclick="startChat('langgraph', 'LangGraph 기반 검색')">
-          <div class="icon">🔄</div>
-          <h3>LangGraph 기반 검색</h3>
-          <p>그래프 파이프라인으로 검색·재시도·생성을 처리합니다.</p>
-        </div>
+      <div class="login-card">
+        <label for="user-id-input">사용자 ID</label>
+        <input id="user-id-input" placeholder="영문·숫자로 입력" autocomplete="off" autocorrect="off" spellcheck="false">
+        <label for="password-input">비밀번호</label>
+        <input id="password-input" type="password" placeholder="비밀번호 입력">
+        <button class="login-btn" id="login-btn" onclick="enterChat()">입장하기</button>
+        <span class="login-error" id="login-error">비밀번호가 일치하지 않습니다.</span>
+        <span class="login-hint">처음 사용하면 자동으로 계정이 생성됩니다.</span>
       </div>
     </div>
 
     <!-- 채팅 화면 (분할) -->
     <div id="chat-view">
       <div class="chat-header">
-        <button class="back-btn" onclick="goBack()">← 뒤로</button>
-        <span id="chat-title">채팅</span>
+        <button class="back-btn" onclick="goBack()">← 나가기</button>
+        <span id="chat-title">자동 라우팅 채팅</span>
         <span id="chat-user-id"></span>
       </div>
       <div class="split-container">
@@ -253,74 +255,89 @@ _HTML = """<!DOCTYPE html>
   </div>
 
   <script>
-    let currentMode = '';
     let currentUserId = '';
-    let currentEffectiveId = '';
     let pendingCount = 0;
 
-    // 단기 메모리: effectiveId → {sop: innerHTML, claude: innerHTML}
+    // 단기 메모리: userId → {sop: innerHTML, claude: innerHTML}
     const sessionCache = new Map();
 
-    const CLAUDE_MAP = { basic: 'claude/basic', rag: 'claude/rag', langchain: 'claude/langchain', langgraph: 'claude/langgraph' };
+    async function enterChat() {
+      const idInput  = document.getElementById('user-id-input');
+      const pwInput  = document.getElementById('password-input');
+      const errSpan  = document.getElementById('login-error');
+      const btn      = document.getElementById('login-btn');
 
-    async function startChat(mode, title) {
-      const userId = document.getElementById('user-id-input').value.trim().toLowerCase();
-      if (!userId) {
-        document.getElementById('id-error').style.display = 'block';
-        document.getElementById('user-id-input').focus();
+      const userId   = idInput.value.trim().toLowerCase();
+      const password = pwInput.value;
+
+      if (!userId || !password) {
+        errSpan.textContent = 'ID와 비밀번호를 모두 입력해주세요.';
+        errSpan.style.display = 'block';
         return;
       }
-      document.getElementById('id-error').style.display = 'none';
-      document.getElementById('user-id-input').value = userId;
 
-      const effectiveId = userId + '_' + mode;
-      const isNewSession = currentEffectiveId !== effectiveId;
+      btn.disabled = true;
+      btn.textContent = '확인 중...';
+      errSpan.style.display = 'none';
 
-      // 다른 세션으로 전환 전, 현재 DOM을 캐시에 저장
-      if (isNewSession && currentEffectiveId) {
-        sessionCache.set(currentEffectiveId, {
+      try {
+        const res  = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: userId, password }),
+        });
+        const data = await res.json();
+
+        if (!data.ok) {
+          errSpan.textContent = '비밀번호가 일치하지 않습니다.';
+          errSpan.style.display = 'block';
+          btn.disabled = false;
+          btn.textContent = '입장하기';
+          return;
+        }
+
+        currentUserId = userId;
+        document.getElementById('chat-user-id').textContent = 'ID: ' + userId;
+        document.getElementById('login-view').style.display = 'none';
+        document.getElementById('chat-view').style.display = 'flex';
+        document.getElementById('chat-view').style.flexDirection = 'column';
+
+        const cached = sessionCache.get(userId);
+        if (cached) {
+          document.getElementById('messages-sop').innerHTML   = cached.sop;
+          document.getElementById('messages-claude').innerHTML = cached.claude;
+        } else {
+          document.getElementById('messages-sop').innerHTML   = '';
+          document.getElementById('messages-claude').innerHTML = '';
+          await loadHistory(userId);
+        }
+
+        document.getElementById('msg-input').focus();
+      } catch (_) {
+        errSpan.textContent = '서버 연결에 실패했습니다.';
+        errSpan.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '입장하기';
+      }
+    }
+
+    function goBack() {
+      if (currentUserId) {
+        sessionCache.set(currentUserId, {
           sop:    document.getElementById('messages-sop').innerHTML,
           claude: document.getElementById('messages-claude').innerHTML,
         });
       }
-
-      currentMode = mode;
-      currentUserId = userId;
-      currentEffectiveId = effectiveId;
-
-      document.getElementById('chat-title').textContent = title;
-      document.getElementById('chat-user-id').textContent = 'ID: ' + effectiveId;
-      document.getElementById('select-view').style.display = 'none';
-      document.getElementById('chat-view').style.display = 'flex';
-      document.getElementById('chat-view').style.flexDirection = 'column';
-
-      if (isNewSession) {
-        const cached = sessionCache.get(effectiveId);
-        if (cached) {
-          // 단기 캐시 복원
-          document.getElementById('messages-sop').innerHTML = cached.sop;
-          document.getElementById('messages-claude').innerHTML = cached.claude;
-        } else {
-          document.getElementById('messages-sop').innerHTML = '';
-          document.getElementById('messages-claude').innerHTML = '';
-          await loadHistory(effectiveId, mode);  // 장기 메모리(JSON) 복원
-        }
-      }
-
-      document.getElementById('msg-input').focus();
+      document.getElementById('login-view').style.display = 'flex';
+      document.getElementById('chat-view').style.display  = 'none';
     }
 
-    function goBack() {
-      document.getElementById('select-view').style.display = 'flex';
-      document.getElementById('chat-view').style.display = 'none';
-    }
-
-    async function loadHistory(threadId, mode) {
+    async function loadHistory(userId) {
       try {
-        const m = mode || 'langgraph';
         const [sopData, claudeData] = await Promise.all([
-          fetch(`/chat/${m}/history?thread_id=${encodeURIComponent(threadId)}`).then(r => r.json()),
-          fetch(`/chat/claude/${m}/history?thread_id=${encodeURIComponent(threadId)}`).then(r => r.json()),
+          fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId)}`).then(r => r.json()),
+          fetch(`/chat/claude/auto/history?thread_id=${encodeURIComponent(userId)}`).then(r => r.json()),
         ]);
         for (const msg of (sopData.messages || [])) {
           addMsg('messages-sop', msg.role === 'user' ? 'user' : 'assistant history', msg.content);
@@ -341,6 +358,15 @@ _HTML = """<!DOCTYPE html>
       return div;
     }
 
+    function addRouteBadge(containerId, label) {
+      const box = document.getElementById(containerId);
+      const div = document.createElement('div');
+      div.className = 'route-badge';
+      div.textContent = '→ ' + label;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    }
+
     function addLabel(containerId, text) {
       const box = document.getElementById(containerId);
       const div = document.createElement('div');
@@ -351,10 +377,10 @@ _HTML = """<!DOCTYPE html>
     }
 
     async function send() {
-      const input = document.getElementById('msg-input');
-      const btn   = document.getElementById('send-btn');
+      const input    = document.getElementById('msg-input');
+      const btn      = document.getElementById('send-btn');
       const question = input.value.trim();
-      if (!question || !currentMode || pendingCount > 0) return;
+      if (!question || !currentUserId || pendingCount > 0) return;
 
       addMsg('messages-sop',    'user', question);
       addMsg('messages-claude', 'user', question);
@@ -362,26 +388,24 @@ _HTML = """<!DOCTYPE html>
       btn.disabled = true;
       pendingCount = 2;
 
-      const sopUrl    = '/chat/' + currentMode + '/stream';
-      const claudeUrl = '/chat/' + CLAUDE_MAP[currentMode] + '/stream';
-
-      streamPanelWith(sopUrl,    question, 'messages-sop',    'assistant');
-      streamPanelWith(claudeUrl, question, 'messages-claude', 'assistant claude-msg');
+      streamPanelWith('/chat/auto/stream',        question, 'messages-sop',    'assistant');
+      streamPanelWith('/chat/claude/auto/stream', question, 'messages-claude', 'assistant claude-msg');
     }
 
     async function streamPanelWith(endpoint, question, containerId, msgClass) {
       const box = document.getElementById(containerId);
-      const statusDiv = addMsg(containerId, 'assistant loading', '생성 중…');
+      const statusDiv = addMsg(containerId, 'assistant loading', '분류 중…');
       let answerDiv = null;
+      let routeLabel = null;
 
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, thread_id: currentEffectiveId || null }),
+          body: JSON.stringify({ question, thread_id: currentUserId || null }),
         });
 
-        const reader = res.body.getReader();
+        const reader  = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';
 
@@ -394,7 +418,12 @@ _HTML = """<!DOCTYPE html>
           for (const part of parts) {
             if (!part.startsWith('data: ')) continue;
             const evt = JSON.parse(part.slice(6));
-            if (evt.type === 'status') {
+
+            if (evt.type === 'mode') {
+              routeLabel = evt.label;
+              statusDiv.textContent = '[' + evt.label + '] 생성 중…';
+              box.scrollTop = box.scrollHeight;
+            } else if (evt.type === 'status') {
               statusDiv.textContent = evt.text;
               box.scrollTop = box.scrollHeight;
             } else if (evt.type === 'text') {
@@ -416,6 +445,7 @@ _HTML = """<!DOCTYPE html>
         statusDiv.textContent = '오류가 발생했습니다.';
         statusDiv.className = 'msg ' + msgClass;
       } finally {
+        if (routeLabel) addRouteBadge(containerId, routeLabel);
         pendingCount--;
         if (pendingCount === 0) {
           document.getElementById('send-btn').disabled = false;
@@ -427,8 +457,11 @@ _HTML = """<!DOCTYPE html>
     document.getElementById('msg-input').addEventListener('keydown', function(e) {
       if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) send();
     });
+    document.getElementById('password-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') enterChat();
+    });
     document.getElementById('user-id-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') document.querySelector('.mode-card:last-child').click();
+      if (e.key === 'Enter') document.getElementById('password-input').focus();
     });
   </script>
 </body>

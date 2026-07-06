@@ -42,6 +42,7 @@ class SOP_GPT_LLM(LLM):
     top_p: Optional[float] = None
     repetition_penalty: float = 1.3
     max_new_tokens: int = 60
+    min_new_tokens: int = 0
 
     @property
     def _llm_type(self) -> str:
@@ -80,6 +81,7 @@ class SOP_GPT_LLM(LLM):
                 top_k=self.top_k,
                 top_p=self.top_p,
                 repetition_penalty=self.repetition_penalty,
+                min_new_tokens=self.min_new_tokens,
             )[0].tolist()
             return decode(out[len(ids):], self.itos).strip()
         except torch.cuda.OutOfMemoryError:
@@ -103,6 +105,7 @@ class SOP_GPT_LLM(LLM):
                 top_k=self.top_k,
                 top_p=self.top_p,
                 repetition_penalty=self.repetition_penalty,
+                min_new_tokens=self.min_new_tokens,
             ):
                 generated.append(token_id)
                 yield decode(generated, self.itos).strip()

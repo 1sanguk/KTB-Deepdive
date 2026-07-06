@@ -147,3 +147,62 @@ async def claude_rag_stream(retriever: Any, threshold: float, question: str) -> 
         async for text in stream_claude(question):
             yield _sse({"type": "text", "text": text})
     yield _sse({"type": "done"})
+
+
+async def auto_sop_stream(question: str, thread_id: str | None) -> AsyncGenerator[str, None]:
+    """질문을 자동 분류해 적합한 SOP_GPT 체인으로 라우팅."""
+    from lc.router import classify_question, CHAIN_FOR, MODE_LABEL
+    import state as _state
+
+    label = classify_question(question)
+    mode  = CHAIN_FOR[label]
+    yield _sse({"type": "mode", "text": mode, "label": MODE_LABEL[mode]})
+
+    if mode == "basic":
+        async for chunk in with_history(
+            sop_stream(_state.qa_llm, f"질문: {question}\n답변: "),
+            thread_id, question,
+        ):
+            yield chunk
+    elif mode == "langchain":
+        async for chunk in with_history(
+            sop_rag_stream(
+                _state.lc_retriever, _state.qa_llm,
+                _state.span_extractor_fn, _state.RAG_SIM_THRESHOLD,
+                question,
+            ),
+            thread_id, question,
+        ):
+            yield chunk
+    elif mode == "langgraph":
+        async for chunk in sop_lg_stream(_state.lg_graph, question, thread_id=thread_id):
+            yield chunk
+
+
+async def auto_claude_stream(question: str, thread_id: str | None) -> AsyncGenerator[str, None]:
+    """질문을 자동 분류해 적합한 Claude 체인으로 라우팅."""
+    from lc.router import classify_question, CHAIN_FOR, MODE_LABEL
+    import state as _state
+
+    label = classify_question(question)
+    mode  = CHAIN_FOR[label]
+    yield _sse({"type": "mode", "text": mode, "label": MODE_LABEL[mode]})
+
+    claude_tid = (thread_id + ":c") if thread_id else None
+
+    if mode == "basic":
+        async def _gen():
+            async for text in stream_claude(question):
+                yield _sse({"type": "text", "text": text})
+            yield _sse({"type": "done"})
+        async for chunk in with_history(_gen(), claude_tid, question):
+            yield chunk
+    elif mode == "langchain":
+        async for chunk in with_history(
+            claude_rag_stream(_state.lc_retriever, _state.RAG_SIM_THRESHOLD, question),
+            claude_tid, question,
+        ):
+            yield chunk
+    elif mode == "langgraph":
+        async for chunk in sop_lg_stream(_state.claude_graph, question, thread_id=claude_tid):
+            yield chunk

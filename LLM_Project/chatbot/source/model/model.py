@@ -135,9 +135,9 @@ class SOP_GPT(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, stop_tokens=None, temperature=1.0,
-                 top_k=None, top_p=None, repetition_penalty=1.0):
+                 top_k=None, top_p=None, repetition_penalty=1.0, min_new_tokens=0):
         past_kvs = None
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             if past_kvs is None:
                 ctx = idx[:, -block_size:]
                 positions = torch.arange(ctx.shape[1], device=idx.device)
@@ -158,16 +158,16 @@ class SOP_GPT(nn.Module):
             rep_ids = set(idx[0, -block_size:].tolist()) if repetition_penalty != 1.0 else None
             next_id = _sample_logits(logits, temperature, top_k, top_p, rep_ids)
             idx = torch.cat([idx, next_id], dim=1)
-            if stop_tokens is not None and next_id.item() in stop_tokens:
+            if stop_tokens is not None and next_id.item() in stop_tokens and step >= min_new_tokens:
                 break
         return idx
 
     @torch.no_grad()
     def generate_stream(self, idx, max_new_tokens, stop_tokens=None, temperature=1.0,
-                        top_k=None, top_p=None, repetition_penalty=1.0):
+                        top_k=None, top_p=None, repetition_penalty=1.0, min_new_tokens=0):
         """토큰을 하나씩 yield하는 스트리밍 버전 (KV cache 적용)."""
         past_kvs = None
-        for _ in range(max_new_tokens):
+        for step in range(max_new_tokens):
             if past_kvs is None:
                 ctx = idx[:, -block_size:]
                 positions = torch.arange(ctx.shape[1], device=idx.device)
@@ -188,7 +188,7 @@ class SOP_GPT(nn.Module):
             next_id = _sample_logits(logits, temperature, top_k, top_p, rep_ids)
             idx = torch.cat([idx, next_id], dim=1)
             yield next_id.item()
-            if stop_tokens is not None and next_id.item() in stop_tokens:
+            if stop_tokens is not None and next_id.item() in stop_tokens and step >= min_new_tokens:
                 break
 
 

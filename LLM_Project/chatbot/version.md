@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-06 — 자동 라우팅 + ID/PWD 로그인 시스템](#2026-07-06--자동-라우팅--idpwd-로그인-시스템)
 - [2026-07-04 — LangGraph 메모리 시스템 + 전 모드 히스토리 + UI 단기 캐시 + 임계값 분리](#2026-07-04--langgraph-메모리-시스템--전-모드-히스토리--ui-단기-캐시--임계값-분리)
 - [2026-07-03 — Claude Agent + Hybrid Retriever 수정 + RAG 답변 품질 개선](#2026-07-03--claude-agent--hybrid-retriever-수정--rag-답변-품질-개선)
 - [2026-07-02 — LangGraph Claude 파이프라인 + UI LangGraph 모드 + 전역 예외 처리](#2026-07-02--langgraph-claude-파이프라인--ui-langgraph-모드--전역-예외-처리)
@@ -13,6 +14,119 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-07-06 — 자동 라우팅 + ID/PWD 로그인 시스템
+
+### 핵심 변경 목적
+
+사용자가 "어떤 체인을 쓸지" 수동으로 선택하는 대신, Claude Haiku가 질문의 성격을 분류해 적합한 체인을 자동으로 선택하도록 변경. 동시에 모드 카드 선택 화면을 ID+비밀번호 로그인 화면으로 교체해 사용자별 히스토리를 더 직관적으로 관리.
+
+---
+
+### 로그인/사용자 관리 (`source/app/auth.py` 신설)
+
+```python
+def login_or_register(user_id: str, password: str) -> tuple[bool, str]:
+    # New ID       → register → (True,  "registered")
+    # 기존 + 맞는 PWD → login   → (True,  "logged_in")
+    # 기존 + 틀린 PWD → reject  → (False, "wrong_password")
+```
+
+- `data/users.json`에 `{id: password}` 형태로 영구 저장
+- 동일 ID에 비밀번호는 하나만 허용 — 첫 입력 시 자동 생성
+- `POST /auth/login` 엔드포인트로 노출
+
+---
+
+### 질문 자동 분류 라우터 (`source/lc/router.py` 신설)
+
+Claude Haiku (temperature=0)로 질문을 세 가지로 분류해 체인을 자동 선택.
+
+| 분류 | 예시 | 선택 체인 |
+|---|---|---|
+| `chit_chat` | "안녕", "심심해", "사랑해" | `basic` (검색 불필요) |
+| `factual` | "세종대왕은 언제 태어났어?", "파리는 어느 나라 수도야?" | `langgraph` (retry 루프 포함) |
+| `general` | "파이썬이 뭐야?", "영화 추천해줘" | `langchain` (BM25+FAISS) |
+
+분류 실패 시 `general`로 폴백.
+
+```python
+CHAIN_FOR = {"chit_chat": "basic", "factual": "langgraph", "general": "langchain"}
+MODE_LABEL = {"basic": "기본 모델", "langchain": "LangChain 검색", "langgraph": "LangGraph 검색"}
+```
+
+---
+
+### 자동 스트리밍 헬퍼 (`source/app/streaming.py`)
+
+**`auto_sop_stream(question, thread_id)`** — SOP_GPT 자동 라우팅 스트림:
+1. `classify_question()` 호출 → 분류 레이블 획득
+2. `{"type": "mode", "text": mode, "label": "LangGraph 검색"}` SSE 이벤트 먼저 전송
+3. 분류 결과에 따라 `sop_stream` / `sop_rag_stream` / `sop_lg_stream` 호출
+
+**`auto_claude_stream(question, thread_id)`** — Claude 자동 라우팅 스트림:
+- 동일한 분류 → `stream_claude` / `claude_rag_stream` / `sop_lg_stream(claude_graph)` 호출
+
+두 함수가 독립적으로 분류를 호출하는 이유: 분프론트엔드에서 두 패널(SOP/Claude)이 각각 스트림 요청을 독립 발사하는 구조라 단일 분류 결과를 공유하기 어렵고, Haiku 분류 호출은 10 토큰 이하로 매우 빠름.
+
+---
+
+### 신규 엔드포인트
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `POST /auth/login` | 로그인 또는 신규 사용자 등록 |
+| `POST /chat/auto/stream` | SOP_GPT 자동 라우팅 SSE 스트림 |
+| `POST /chat/claude/auto/stream` | Claude 자동 라우팅 SSE 스트림 |
+| `GET /chat/auto/history?thread_id=` | SOP 자동 라우팅 히스토리 |
+| `GET /chat/claude/auto/history?thread_id=` | Claude 자동 라우팅 히스토리 |
+
+---
+
+### UI 전면 개편 (`source/app/ui.py`)
+
+**변경 전**: 모드 카드 4개(기본 모델 / RAG / LangChain / LangGraph) 선택 후 사용자 ID 입력 → 채팅
+
+**변경 후**: 로그인 화면(ID + 비밀번호 입력 → 입장하기) → 채팅 화면 (자동 라우팅)
+
+- 로그인 카드 UI: ID input + password input + 입장하기 버튼 + "처음 사용하면 자동으로 계정이 생성됩니다." 안내
+- 채팅 시 thread_id = user_id (모드 구분 없음)
+- Claude thread_id = `{user_id}:c` (기존 방식 유지)
+
+**라우팅 배지 표시**: 스트리밍 완료 후 응답 버블 아래에 `→ LangGraph 검색` 형태의 배지 표시 (스트리밍 중에는 `[LangGraph 검색] 생성 중…` 로 상태 메시지만 업데이트)
+
+```
+흐름:
+"분류 중…" (상태 버블)
+  → mode 이벤트 수신: "[LangGraph 검색] 생성 중…"
+  → 스트리밍 (text / rag_context / status 등)
+  → 완료 후: → LangGraph 검색 배지 표시
+```
+
+---
+
+### 최소 생성 길이 보장 (`min_new_tokens`)
+
+**문제**: `stop_on="sentence"`가 설정되어 있어도 모델이 첫 토큰부터 `"네?"` 같이 `.?!`로 끝나는 짧은 응답을 생성하면 즉시 멈춰버려 1~2 단어 응답이 출력되는 현상.
+
+**해결**: `min_new_tokens` 파라미터를 `generate` / `generate_stream`에 추가. 이 값만큼의 토큰을 생성하기 전까지는 stop token을 무시한다.
+
+```python
+# model.py — generate / generate_stream 공통
+for step in range(max_new_tokens):
+    ...
+    if stop_tokens is not None and next_id.item() in stop_tokens and step >= min_new_tokens:
+        break
+```
+
+**변경 파일:**
+- `source/model/model.py` — `generate`, `generate_stream`에 `min_new_tokens=0` 파라미터 추가
+- `source/lc/llm.py` — `SOP_GPT_LLM`에 `min_new_tokens: int = 0` 필드 추가, 두 generate 호출에 전달
+- `source/app/state.py` — `qa_llm`에 `min_new_tokens=20` 적용
+
+재학습 불필요. 모델 가중치는 변경 없음.
 
 ---
 

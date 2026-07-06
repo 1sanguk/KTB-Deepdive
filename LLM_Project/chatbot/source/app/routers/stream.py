@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 import state
 from lc.claude_llm import stream_claude
 from models import ChatRequest
-from streaming import _sse, sop_stream, sop_rag_stream, sop_lg_stream, claude_rag_stream, with_history
+from streaming import _sse, sop_stream, sop_rag_stream, sop_lg_stream, claude_rag_stream, with_history, auto_sop_stream, auto_claude_stream
 
 router = APIRouter()
 
@@ -100,5 +100,21 @@ async def chat_claude_langchain_stream(req: ChatRequest) -> StreamingResponse:
             claude_rag_stream(state.lc_retriever, state.RAG_SIM_THRESHOLD, req.question),
             claude_tid, req.question,
         ),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/auto/stream")
+async def chat_auto_stream(req: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        auto_sop_stream(req.question, req.thread_id),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/claude/auto/stream")
+async def chat_claude_auto_stream(req: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        auto_claude_stream(req.question, req.thread_id),
         media_type="text/event-stream",
     )

@@ -4,7 +4,7 @@
 
 ## 개요
 > 체크포인트 3개(`SOP_GPT.pt` / `SOP_GPT_qa.pt` / `SOP_GPT_span.pt`)가 역할을 나눠 쓰이는 구조.  
-> 검색 방식에 따라 **기본 모델 / RAG / LangChain / LangGraph** 네 가지 모드를 선택하고, 각 모드에서 SOP_GPT와 Claude를 좌/우 분할화면으로 동시에 비교할 수 있다.
+> **자동 라우팅 모드**: ID+비밀번호로 로그인하면 질문의 성격(잡담/사실형/일반)을 Claude Haiku가 자동 분류해 가장 적합한 체인(basic/langchain/langgraph)으로 라우팅. SOP_GPT와 Claude를 좌/우 분할화면으로 동시에 비교 가능.
 
 ![STEP 1 – Basic GPT Chatbot](images/basic.png)
 
@@ -21,6 +21,8 @@
 - **LangChain 파이프라인**: `SOP_GPT`를 `BaseLLM`으로 래핑하고 LCEL로 검색기와 연결. 검색 방식(TF-IDF / BM25+FAISS)에 따라 체인을 교체할 수 있는 구조
 - **LangGraph 파이프라인**: `StateGraph`로 검색→평가→재시도→생성 흐름을 명시적 그래프로 표현. 임계값을 단계적으로 완화하는 retry 루프 내장
 - **Claude API 연동**: 동일한 검색기를 재사용하고 답변 생성만 `claude-haiku-4-5-20251001`으로 교체. SOP_GPT와 실시간 비교 가능
+- **자동 라우팅**: Claude Haiku(temperature=0)가 질문을 `chit_chat / factual / general` 세 가지로 분류해 `basic / langgraph / langchain` 체인을 자동 선택 (`source/lc/router.py`)
+- **로그인 시스템**: ID+비밀번호 입력 → 신규 ID면 자동 생성, 기존 ID면 비밀번호 검증. 동일 ID에 하나의 비밀번호만 허용 (`source/app/auth.py`)
 - **서빙**: FastAPI로 채팅 엔드포인트 + SSE 스트리밍 엔드포인트 제공 + 분할화면 웹 UI
 - **트레이싱**: LangSmith로 체인 실행 기록 자동 수집 (APAC 엔드포인트)
 
@@ -176,17 +178,19 @@ chatbot/
     ├── app/
     │   ├── app.py              # FastAPI 선언 + 라우터 등록 (진입점)
     │   ├── state.py            # 모델·체인·검색기 초기화 (import 시점 1회 실행)
-    │   ├── models.py           # Pydantic 스키마
-    │   ├── streaming.py        # SSE 헬퍼 (sop_stream, sop_lg_stream, claude_rag_stream 등)
-    │   ├── ui.py               # GET / 웹 UI (분할화면 HTML, 모드 카드 4개)
+    │   ├── auth.py             # ID+PWD 로그인/사용자 생성 (data/users.json)
+    │   ├── models.py           # Pydantic 스키마 (AuthRequest/AuthResponse 포함)
+    │   ├── streaming.py        # SSE 헬퍼 (auto_sop_stream, auto_claude_stream 포함)
+    │   ├── ui.py               # GET / 웹 UI (로그인 화면 + 자동 라우팅 채팅)
     │   └── routers/
-    │       ├── chat.py         # non-streaming 엔드포인트 9개
-    │       └── stream.py       # SSE 스트리밍 엔드포인트 8개
+    │       ├── chat.py         # non-streaming 엔드포인트 + /auth/login
+    │       └── stream.py       # SSE 스트리밍 엔드포인트 (/chat/auto/stream 포함)
     ├── lc/                     # LangChain 통합 레이어
     │   ├── retriever.py        # HybridRetriever (BM25 + FAISS, normalize_embeddings=True)
     │   ├── llm.py              # SOP_GPT_LLM (LangChain LLM 래퍼 + 스트리밍)
     │   ├── chain.py            # LCEL 파이프라인 조립 + _expand_span 답변 확장
-    │   └── claude_llm.py       # Claude API 연동 (답변 생성 + SSE 스트리밍 + Agent 도구)
+    │   ├── claude_llm.py       # Claude API 연동 (답변 생성 + SSE 스트리밍 + Agent 도구)
+    │   └── router.py           # Claude Haiku 기반 질문 분류기 (자동 라우팅)
     ├── lg/                     # LangGraph 파이프라인 레이어
     │   ├── models.py           # GraphState / AgentState TypedDict
     │   ├── nodes.py            # 노드 팩토리 8개 (SOP_GPT 4개 + Claude 4개)
@@ -255,11 +259,20 @@ python main.py chat_span     # Stage 4 RAG QA REPL
 
 ## API
 
+**인증**
+- `POST /auth/login` — `{"user_id": str, "password": str}` → `{"ok": bool, "msg": str}` — 로그인 또는 신규 계정 자동 생성
+
+**자동 라우팅 (추천)**
+- `POST /chat/auto/stream` — 질문 자동 분류 → 적합한 SOP_GPT 체인 스트리밍
+- `POST /chat/claude/auto/stream` — 질문 자동 분류 → 적합한 Claude 체인 스트리밍
+
+이벤트 타입 (SSE): `mode` (선택된 체인) | `text` | `text_fallback` | `rag_context` | `status` | `done`
+
 **SOP_GPT 엔드포인트**
 - `POST /generate` — `{"prompt": str}` → `{"text": str}` — Stage 1 이어쓰기
 - `POST /chat/basic` — `{"question": str}` → `{"answer", "retrieved_context", "used_rag"}` — 검색 없이 QA 모델 직접 응답
-- `POST /chat/rag` — `{"question": str}` → `{"answer", "retrieved_context", "used_rag"}` — TF-IDF 검색 + 유사도 라우팅
-- `POST /chat/langchain` — `{"question": str}` → `{"answer", "retrieved_context", "used_rag"}` — BM25+FAISS 검색 + 유사도 라우팅
+- `POST /chat/rag` — TF-IDF 검색 + 유사도 라우팅
+- `POST /chat/langchain` — BM25+FAISS 검색 + 유사도 라우팅
 - `POST /chat/langgraph` — BM25+FAISS 검색 + retry 루프 + SOP_GPT 답변 (LangGraph 파이프라인)
 
 **Claude 엔드포인트**
@@ -269,16 +282,13 @@ python main.py chat_span     # Stage 4 RAG QA REPL
 - `POST /chat/claude/langgraph` — BM25+FAISS 검색 + retry 루프 + Claude 답변 (LangGraph 파이프라인)
 
 **SSE 스트리밍 엔드포인트** (text/event-stream)
-
-이벤트 타입: `text` (RAG 성공 답변) | `text_fallback` (RAG 실패·직접 생성) | `rag_context` (참고 문서) | `status` (검색 중·재시도 중) | `done`
-
 - `POST /chat/{basic|rag|langchain}/stream` — SOP_GPT 스트리밍
-- `POST /chat/langgraph/stream` — LangGraph 노드별 상태 이벤트 (`status` → 같은 말풍선, `text_fallback` → 새 말풍선)
+- `POST /chat/langgraph/stream` — LangGraph 노드별 상태 이벤트
 - `POST /chat/claude/{basic|rag|langchain}/stream` — Claude 스트리밍
 - `POST /chat/claude/langgraph/stream` — Claude LangGraph 스트리밍
 
 **UI / Docs**
-- `GET /` — 분할화면 웹 채팅 UI (좌: SOP_GPT, 우: Claude)
+- `GET /` — 로그인 화면 → 자동 라우팅 분할화면 웹 채팅 UI (좌: SOP_GPT, 우: Claude)
 - `GET /docs` — Swagger UI
 
 자세한 개발 과정은 [basicdata/plan.md](basicdata/plan.md), 단계별 변경 이력은 [version.md](version.md), 체인 평가 결과는 [basicdata/eval.md](basicdata/eval.md) 참고.

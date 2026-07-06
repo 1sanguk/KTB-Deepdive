@@ -80,7 +80,7 @@ gen_llm = SOP_GPT_LLM(
 qa_llm = SOP_GPT_LLM(
     torch_model=qa_model, stoi=stoi, itos=itos, merges=merges, base_set=base_set,
     stop_on="sentence", temperature=0.7, top_k=40, top_p=0.9,
-    repetition_penalty=1.3, max_new_tokens=250,
+    repetition_penalty=1.3, max_new_tokens=250, min_new_tokens=20,
 )
 span_extractor_fn = make_span_extractor(span_model, stoi, merges, base_set)
 

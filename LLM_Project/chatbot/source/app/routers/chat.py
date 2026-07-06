@@ -1,14 +1,21 @@
 from fastapi import APIRouter, Query
 
 import state
+from auth import login_or_register
 from lc.claude_llm import ask_claude
-from models import ChatRequest, ChatResponse, GenerateRequest, GenerateResponse
+from models import AuthRequest, AuthResponse, ChatRequest, ChatResponse, GenerateRequest, GenerateResponse
 
 router = APIRouter()
 
 _ERR_SOP  = "[오류] 모델 추론 중 오류가 발생했습니다."
 _ERR_RAG  = "[오류] 검색 중 오류가 발생했습니다."
 _ERR_GRAPH = "[오류] 파이프라인 실행 중 오류가 발생했습니다."
+
+
+@router.post("/auth/login", response_model=AuthResponse)
+def auth_login(req: AuthRequest) -> AuthResponse:
+    ok, msg = login_or_register(req.user_id, req.password)
+    return AuthResponse(ok=ok, msg=msg)
 
 
 @router.post("/generate", response_model=GenerateResponse)
@@ -169,3 +176,15 @@ def get_claude_langgraph_history(thread_id: str = Query(...)):
     except Exception:
         pass
     return {"messages": state.load_history(claude_tid)}
+
+
+@router.get("/chat/auto/history")
+def get_auto_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid)}
+
+
+@router.get("/chat/claude/auto/history")
+def get_claude_auto_history(thread_id: str = Query(...)):
+    tid = thread_id.strip().lower()
+    return {"messages": state.load_history(tid + ":c")}
