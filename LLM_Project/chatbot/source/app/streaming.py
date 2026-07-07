@@ -127,7 +127,7 @@ async def with_history(gen: AsyncGenerator[str, None], thread_id: str | None, qu
         try:
             data = json.loads(chunk.removeprefix("data: ").strip())
             if data.get("type") in ("text", "text_fallback"):
-                answer += data.get("text", "")
+                answer = data.get("text", "")
         except Exception:
             pass
     if thread_id and answer:
