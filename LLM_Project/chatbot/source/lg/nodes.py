@@ -2,6 +2,7 @@ from typing import Callable
 
 from lg.models import GraphState, AgentState
 from lc.retriever import HybridRetriever
+from lc.chain import _expand_span
 from llm.sop_llm import SOP_GPT_LLM
 from llm.claude_llm import ask_claude, ask_claude_with_context, call_claude_agent_sync
 from llm.qwen_llm import QwenBase
@@ -32,17 +33,7 @@ def make_generate_span_node(span_extractor_fn: Callable[[dict], str]) -> Callabl
     def generate_span(state: GraphState) -> GraphState:
         context = state['documents'][0]
         span = span_extractor_fn({"question": state['query'], "context": context})
-        if not span or len(span) < 30:
-            answer = context
-        else:
-            sentences = [s.strip() for s in context.replace('!', '.').replace('?', '.').split('.') if s.strip()]
-            answer = context
-            for i, s in enumerate(sentences):
-                if span in s:
-                    start = max(0, i - 2)
-                    end = min(len(sentences), i + 3)
-                    answer = '. '.join(sentences[start:end]) + '.'
-                    break
+        answer = _expand_span(span, context)
         return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
 
     return generate_span
@@ -87,11 +78,18 @@ def make_claude_agent_node() -> Callable[[AgentState], AgentState]:
         
         new_messages = state['messages'] + [{"role": "assistant", "content": response.content}]
         answer = ""
-        if response.stop_reason == "end_turn":
+        if response.stop_reason in ("end_turn", "max_tokens"):
             for block in response.content:
-                if hasattr(block, "text"):
+                if getattr(block, "type", None) == "text" and getattr(block, "text", ""):
                     answer = block.text
                     break
+            if not answer:
+                for msg in reversed(new_messages):
+                    if msg.get("role") == "assistant":
+                        content = msg.get("content", "")
+                        if isinstance(content, str) and content:
+                            answer = content
+                            break
         return {
             **state, "messages": new_messages, "stop_reason": response.stop_reason, "answer": answer,
         }

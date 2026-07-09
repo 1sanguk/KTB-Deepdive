@@ -2,7 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
-- [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화)
+- [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화 + Claude Agent Graph 서빙 연동 + 코드 구조 리팩토링](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화--claude-agent-graph-서빙-연동)
 - [2026-07-08 — Qwen3-1.7B 도입 + llm/ 디렉토리 재구성 + retry 임계값 검증](#2026-07-08--qwen3-17b-도입--llm-디렉토리-재구성--retry-임계값-검증)
 - [2026-07-07 — 히스토리 누적 버그 수정 + 최소 생성 길이 보장 + uv 패키지 관리 세팅](#2026-07-07--히스토리-누적-버그-수정--최소-생성-길이-보장--uv-패키지-관리-세팅)
 - [2026-07-06 — 자동 라우팅 + ID/PWD 로그인 시스템](#2026-07-06--자동-라우팅--idpwd-로그인-시스템)
@@ -20,7 +20,7 @@
 
 ---
 
-## 2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화
+## 2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화 + Claude Agent Graph 서빙 연동
 
 ### DPO 학습 완료 (Stage 5)
 
@@ -80,6 +80,85 @@ Q4_K_M 모드에서 느린 응답 속도(3.62s/q)와 과도한 출력 길이(55.
 | 평균 응답길이(단어) | 55.3 | 12.0 | 12.3 |
 
 Q4 신버전이 BF16보다 3.3배 빠르고 정확도 2%p 차이. think/no_think 분포: 전체 100문항 중 64개 THINK, 36개 NO_THINK 자동 선택.
+
+---
+
+### Claude Agent Graph 서빙 연동 (`source/app/state.py`, `source/app/streaming.py`)
+
+`build_claude_agent_graph(retriever)`를 서버 기동 시 초기화하고, `/chat/claude/auto/stream`의 langgraph 브랜치를 파이프라인 그래프 대신 agent 그래프로 전환했다.
+
+**`state.py`**: `build_claude_agent_graph` import 추가, `total_count 11→12`, 초기화 블록 추가
+
+**`streaming.py`** — `agent_lg_stream(graph, question, thread_id)` 신설:
+- `AgentState` 기반 초기화 (`GraphState`의 `documents`, `score`, `retry_count`와 다른 필드 구조)
+- `tool_executor` 청크 → `status "검색 중...."` + `rag_context` 이벤트
+- `agent` 청크 (`stop_reason in ("end_turn", "max_tokens")`) → `text` 이벤트
+- 완료 후 `append_history(thread_id, ...)` 저장 (agent 그래프는 checkpointer 없으므로 `save_history` 대신 `append_history`)
+
+**`auto_claude_stream`**: `langgraph` 브랜치 → `sop_lg_stream(_state.claude_graph)` → `agent_lg_stream(_state.claude_agent_graph)`
+
+`sop_lg_stream`을 재사용할 수 없는 이유: `GraphState` 초기 필드(`documents`, `score`, `retry_count`)를 하드코딩해서 `AgentState` 스키마와 맞지 않기 때문이다.
+
+---
+
+### Claude API MAX_TOKENS 128 → 512 + agent answer 추출 버그 수정 (`source/llm/claude_llm.py`, `source/lg/nodes.py`)
+
+`MAX_TOKENS = 128`이 너무 작아서 잡담형 응답이 생성 중간에 잘려 `stop_reason = "max_tokens"`로 종료되는 문제가 있었다. `make_claude_agent_node`는 `stop_reason == "end_turn"`일 때만 answer를 추출했으므로, `max_tokens`로 종료되면 answer가 항상 빈 문자열로 반환됐다.
+
+**수정:**
+- `MAX_TOKENS: 128 → 512` (`claude_llm.py`)
+- `make_claude_agent_node`: `stop_reason == "end_turn"` → `in ("end_turn", "max_tokens")` (`nodes.py`)
+- 블록 타입 체크: `hasattr(block, "text")` → `getattr(block, "type", None) == "text"` (Anthropic ContentBlock 객체에 `type` attribute 체크가 안전)
+- messages 폴백: 위 추출 실패 시 `messages` 리스트 마지막 assistant 메시지에서 텍스트 추출
+- `agent_lg_stream`도 동일하게 `stop_reason in ("end_turn", "max_tokens")` 조건 적용
+
+---
+
+### 코드 정리 (`source/lg/nodes.py`, `source/llm/claude_llm.py`)
+
+**`make_generate_span_node`**: 12줄짜리 span 확장 로직을 인라인에서 제거하고 `from lc.chain import _expand_span`으로 교체. `lc/chain.py`의 `sop_rag_stream`과 `lg/nodes.py`에 동일 로직이 중복 존재했으나 `_expand_span()` 공통 호출로 통일.
+
+**`build_claude_langgraph` 제거**: `threshold: list[float]`를 인자로 받지만 내부 구현은 단일 `float` 비교(`score >= threshold`)라 실제 list를 넘기면 `TypeError`가 발생하는 데드코드. `build_claude_rag_chain`과 동일한 구현이며 프로젝트 어디에서도 import되지 않아 삭제.
+
+---
+
+### `pyproject.toml` 의존성 명시
+
+**`langchain-classic>=1.0.8`** 추가. 기존에는 `langchain-community`의 transitive dependency로만 설치돼 시스템 Python에서 직접 실행 시 `ModuleNotFoundError: No module named 'langchain_classic'` 발생.
+
+---
+
+### 코드 구조 리팩토링 — God Object 분리
+
+#### `ui.py` → `static/index.html` + `app.py` 직접 등록
+
+525줄짜리 `ui.py`(Python 문자열로 HTML 인라인 관리)를 파일 분리 방식으로 교체했다.
+
+- `source/app/static/index.html` 신설: HTML 본문 (CSS 분리 이후 307줄)
+- `source/app/static/style.css` 신설: CSS 전체 (204줄)
+- `ui.py` 삭제. `app.py`에 `@app.get("/")`을 직접 등록해 `_STATIC_DIR / "index.html"`을 `HTMLResponse`로 반환
+- `app.py`에 `StaticFiles` 마운트 추가 → `/static/style.css` 브라우저 요청 처리
+
+#### `state.py` → `history.py` 분리
+
+`state.py`는 모델/체인/검색기 초기화 전용인데 히스토리 I/O 함수까지 포함하고 있었다.
+
+- `source/app/history.py` 신설: `load_history`, `save_history`, `append_history` + `_history_dir` 경로 관리
+- `state.py`: 해당 함수 제거 + `from history import load_history, save_history, append_history` 추가 (기존 `state.load_history(...)` 호출이 그대로 동작하도록 re-export)
+- `import json` 불필요해져 함께 제거
+
+#### `retriever.py` — `HybridRetriever` 책임 분리
+
+단일 클래스에 FAISS 빌드·캐시 관리·calibration·정규화 수식·검색까지 모든 책임이 집중되어 있었다. 4개 함수를 모듈 레벨로 추출했다.
+
+| 추출된 함수 | 역할 |
+|---|---|
+| `_build_or_load_faiss(passages, embeddings)` | FAISS 인덱스 캐시 로드 또는 배치 빌드 후 저장 |
+| `_load_ragdata_questions(ragdata_dir)` | ragdata 마크다운 헤딩 질문 추출 (기존 static method) |
+| `_fixed_normalize(x, lo, hi)` | 고정 범위 정규화 수식 (기존 static method) |
+| `_calibrate(retriever, root_dir, sample_size)` | relevant/irrelevant 샘플 기반 정규화 기준 계산 및 캐시 |
+
+`HybridRetriever` 클래스는 이제 BM25+FAISS 설정 및 검색 인터페이스(`retrieve`, `_raw_scores`, `_hybrid_scores`, `best_match`)만 담당한다.
 
 ---
 

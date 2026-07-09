@@ -137,6 +137,61 @@ async def with_history(gen: AsyncGenerator[str, None], thread_id: str | None, qu
         ])
 
 
+async def agent_lg_stream(graph: CompiledStateGraph, question: str, thread_id: str | None = None) -> AsyncGenerator[str, None]:
+    """Claude Agent Graph(AgentState) 전용 스트리밍."""
+    q = queue.Queue()
+
+    def run():
+        try:
+            for chunk in graph.stream({
+                "query":             question,
+                "messages":          [],
+                "stop_reason":       "",
+                "answer":            "",
+                "used_rag":          False,
+                "retrieved_context": "",
+            }):
+                q.put(chunk)
+        except Exception as e:
+            q.put(e)
+        finally:
+            q.put(None)
+
+    threading.Thread(target=run, daemon=True).start()
+    loop = asyncio.get_running_loop()
+    answer = ""
+    while True:
+        chunk = await loop.run_in_executor(None, q.get)
+        if chunk is None:
+            break
+        if isinstance(chunk, Exception):
+            yield _sse({"type": "text", "text": f"[오류] Agent 실행 중 오류가 발생했습니다. ({type(chunk).__name__})"})
+            break
+
+        if "tool_executor" in chunk:
+            context = chunk["tool_executor"].get("retrieved_context", "")
+            yield _sse({"type": "status", "text": "검색 중...."})
+            if context:
+                yield _sse({"type": "rag_context", "text": context})
+        elif "agent" in chunk:
+            node_state = chunk["agent"]
+            if node_state.get("stop_reason") in ("end_turn", "max_tokens") and node_state.get("answer"):
+                answer = node_state["answer"]
+                yield _sse({"type": "text", "text": answer})
+
+    yield _sse({"type": "done"})
+
+    if thread_id and answer:
+        try:
+            import state as _state
+            _state.append_history(thread_id, [
+                {"role": "user",      "content": question},
+                {"role": "assistant", "content": answer},
+            ])
+        except Exception:
+            pass
+
+
 async def claude_rag_stream(retriever: Any, threshold: float, question: str) -> AsyncGenerator[str, None]:
     context, score = retriever.best_match(question)
     if score >= threshold:
@@ -204,5 +259,5 @@ async def auto_claude_stream(question: str, thread_id: str | None) -> AsyncGener
         ):
             yield chunk
     elif mode == "langgraph":
-        async for chunk in sop_lg_stream(_state.claude_graph, question, thread_id=claude_tid):
+        async for chunk in agent_lg_stream(_state.claude_agent_graph, question, thread_id=claude_tid):
             yield chunk

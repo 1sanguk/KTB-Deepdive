@@ -10,6 +10,7 @@ dependencies = [
     "httpx>=0.28.1",
     "korpora>=0.2.0",
     "langchain>=0.3.25",
+    "langchain-classic>=1.0.8",
     "langchain-community>=0.3.7",
     "langchain-core>=0.3.86",
     "langchain-huggingface>=0.2.0",

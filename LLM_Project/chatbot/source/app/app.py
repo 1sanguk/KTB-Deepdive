@@ -17,13 +17,21 @@ sys.path.insert(0, str(_SOURCE / "model" / "sop_model"))
 sys.path.insert(0, str(_SOURCE))
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 import state  # 모델·체인·검색기 초기화 (import 시점에 실행)
 from routers import chat, stream
-from ui import router as ui_router
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(title="SOP_GPT 한국어 챗봇")
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 app.include_router(chat.router)
 app.include_router(stream.router)
-app.include_router(ui_router)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return (_STATIC_DIR / "index.html").read_text(encoding="utf-8")

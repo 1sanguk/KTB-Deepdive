@@ -8,7 +8,7 @@ from anthropic import AsyncAnthropic
 from lc.retriever import HybridRetriever
 
 MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 128
+MAX_TOKENS = 512
 
 
 def _client() -> anthropic.Anthropic:
@@ -96,17 +96,6 @@ def build_claude_rag_chain(retriever: HybridRetriever, threshold: float) -> Call
         return {"answer": answer, "retrieved_context": "", "used_rag": False}
     return retrieve_and_answer
 
-
-def build_claude_langgraph(retriever: HybridRetriever, threshold: list[float]) -> Callable[[str], dict]:
-    """retriever로 문서를 검색하고, 점수에 따라 Claude에게 컨텍스트 제공 여부를 결정."""
-    def retrieve_and_answer(question: str) -> dict:
-        context, score = retriever.best_match(question)
-        if score >= threshold:
-            answer = ask_claude_with_context(question, context)
-            return {"answer": answer, "retrieved_context": context, "used_rag": True}
-        answer = ask_claude(question)
-        return {"answer": answer, "retrieved_context": "", "used_rag": False}
-    return retrieve_and_answer
 
 
 AGENT_TOOLS = [

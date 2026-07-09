@@ -24,15 +24,94 @@ from rag import load_korquad_qa_pairs, chunk_context, load_ragdata_passages  # n
 from tokenizer import load_korean_chatbot_data  # noqa: E402
 
 EMBED_MODEL_NAME = "jhgan/ko-sroberta-multitask"
-RERANK_MODEL_NAME = "bongsoo/klue-cross-encoder-v1"  # 한국어 특화 Cross-Encoder
-CALIBRATION_SAMPLE_SIZE = 80  # 보정(calibration)에 쓸 relevant/irrelevant 질문 샘플 개수
-TOP_K = 5        # BM25Retriever / FAISS retriever가 EnsembleRetriever용으로 반환할 후보 개수
-RERANK_TOP_K = 10  # re-rank 전 hybrid에서 뽑을 후보 수
+RERANK_MODEL_NAME = "bongsoo/klue-cross-encoder-v1"
+CALIBRATION_SAMPLE_SIZE = 80
+TOP_K = 5
+RERANK_TOP_K = 10
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
 PASSAGES_CACHE = CACHE_DIR / "passages.pkl"
 FAISS_CACHE    = CACHE_DIR / "faiss_index"
 CALIBRATION_CACHE = CACHE_DIR / "calibration.json"
+
+
+def _build_or_load_faiss(passages: list[str], embeddings) -> FAISS:
+    """FAISS 인덱스를 캐시에서 로드하거나, 없으면 배치 빌드 후 저장."""
+    if FAISS_CACHE.exists():
+        print("[hybrid] FAISS 캐시 로드 중...")
+        return FAISS.load_local(str(FAISS_CACHE), embeddings, allow_dangerous_deserialization=True)
+    BATCH = 500
+    print(f"[hybrid] FAISS 인덱스 배치 빌드 중 (배치 {BATCH}개씩, 최초 1회)...")
+    # FAISS.from_texts(전체)는 M2 Apple Silicon에서 토크나이저 멀티프로세싱 segfault 유발.
+    # 500개 단위 배치로 나눠서 add_texts()로 추가하는 방식으로 우회한다.
+    vs = FAISS.from_texts(passages[:BATCH], embeddings, normalize_L2=True)
+    for i in range(BATCH, len(passages), BATCH):
+        vs.add_texts(passages[i:i+BATCH])
+        print(f"[hybrid] [{min(i+BATCH, len(passages)):,}/{len(passages):,}] 완료", flush=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    vs.save_local(str(FAISS_CACHE))
+    print("[hybrid] FAISS 인덱스 저장 완료.")
+    return vs
+
+
+def _load_ragdata_questions(ragdata_dir: str | None = None) -> list[str]:
+    """ragdata 마크다운 헤딩(##, ###)을 질문 형태로 추출."""
+    path = Path(ragdata_dir) if ragdata_dir else CACHE_DIR.parent.parent / "ragdata"
+    questions = []
+    for md_file in path.rglob("*.md"):
+        for line in md_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("## ") or line.startswith("### "):
+                q = line.lstrip("#").strip()
+                if q and not q.endswith("|"):
+                    questions.append(q if q.endswith("?") else q + "?")
+    return questions
+
+
+def _fixed_normalize(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    return np.clip((x - lo) / (hi - lo), 0.0, 1.0) if hi > lo else np.zeros_like(x)
+
+
+def _calibrate(retriever: "HybridRetriever", root_dir: str | None = None, sample_size: int = CALIBRATION_SAMPLE_SIZE) -> None:
+    """relevant/irrelevant 샘플로 sparse/dense 점수의 정규화 기준을 계산해 retriever에 설정."""
+    if CALIBRATION_CACHE.exists():
+        print("[hybrid] calibration 캐시 로드 중...")
+        retriever.norm_bounds = json.loads(CALIBRATION_CACHE.read_text())
+        return
+
+    print("[hybrid] calibration 계산 중... (최초 1회)")
+    korquad_qs = [q for _, q, _, _ in load_korquad_qa_pairs(root_dir)]
+    ragdata_qs = _load_ragdata_questions()
+    print(f"[hybrid] relevant 질문: KorQuAD {len(korquad_qs):,}개 + ragdata {len(ragdata_qs):,}개")
+
+    # KorQuAD와 ragdata를 50:50으로 샘플링 — ragdata 도메인 쿼리가 calibration에 충분히 반영되도록.
+    half = sample_size // 2
+    random.Random(0).shuffle(korquad_qs)
+    random.Random(1).shuffle(ragdata_qs)
+    rel_sample = korquad_qs[:half] + (ragdata_qs[:half] if ragdata_qs else korquad_qs[half:sample_size])
+
+    chatbot_text = load_korean_chatbot_data()
+    irrelevant_qs = [line.split("\t")[0] for line in chatbot_text.split("\n") if "\t" in line]
+    random.Random(2).shuffle(irrelevant_qs)
+    irr_sample = irrelevant_qs[:sample_size]
+
+    def raw_best_scores(qs):
+        sparse, dense = [], []
+        for q in qs:
+            s, d = retriever._raw_scores(q)
+            sparse.append(s.max())
+            dense.append(d.max())
+        return np.array(sparse), np.array(dense)
+
+    rel_sparse, rel_dense = raw_best_scores(rel_sample)
+    irr_sparse, irr_dense = raw_best_scores(irr_sample)
+    retriever.norm_bounds = {
+        "sparse_lo": float(irr_sparse.mean()), "sparse_hi": float(rel_sparse.mean()),
+        "dense_lo": float(irr_dense.mean()), "dense_hi": float(rel_dense.mean()),
+    }
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    CALIBRATION_CACHE.write_text(json.dumps(retriever.norm_bounds))
+    print("[hybrid] calibration 캐시 저장 완료.")
 
 
 class HybridRetriever:
@@ -63,21 +142,7 @@ class HybridRetriever:
         # langchain_community FAISS의 COSINE distance_strategy는 IndexFlatL2를 그대로 쓰고
         # normalize_L2를 무시하는 미구현 상태라, 정규화된 벡터 + 기본 EUCLIDEAN 전략을 써서
         # 코사인 유사도와 단조 대응되는 점수(_euclidean_relevance_score_fn)를 얻는다.
-        if FAISS_CACHE.exists():
-            print("[hybrid] FAISS 캐시 로드 중...")
-            self.vectorstore = FAISS.load_local(str(FAISS_CACHE), embeddings, allow_dangerous_deserialization=True)
-        else:
-            # FAISS.from_texts(전체)는 M2 Apple Silicon에서 토크나이저 멀티프로세싱 segfault 유발.
-            # 500개 단위 배치로 나눠서 add_texts()로 추가하는 방식으로 우회한다.
-            BATCH = 500
-            print(f"[hybrid] FAISS 인덱스 배치 빌드 중 (배치 {BATCH}개씩, 최초 1회)...")
-            self.vectorstore = FAISS.from_texts(passages[:BATCH], embeddings, normalize_L2=True)
-            for i in range(BATCH, len(passages), BATCH):
-                self.vectorstore.add_texts(passages[i:i+BATCH])
-                print(f"[hybrid] [{min(i+BATCH, len(passages)):,}/{len(passages):,}] 완료", flush=True)
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            self.vectorstore.save_local(str(FAISS_CACHE))
-            print("[hybrid] FAISS 인덱스 저장 완료.")
+        self.vectorstore = _build_or_load_faiss(passages, embeddings)
         faiss_retriever = self.vectorstore.as_retriever(search_kwargs={"k": TOP_K})
         self.ensemble = EnsembleRetriever(retrievers=[self.bm25, faiss_retriever], weights=[alpha, 1 - alpha])
 
@@ -100,82 +165,19 @@ class HybridRetriever:
                 dense[idx] = score
         return sparse, dense
 
-    @staticmethod
-    def _load_ragdata_questions(ragdata_dir: str | None = None) -> list[str]:
-        """ragdata 마크다운 헤딩(##, ###)을 질문 형태로 추출."""
-        path = Path(ragdata_dir) if ragdata_dir else CACHE_DIR.parent.parent / "ragdata"
-        questions = []
-        for md_file in path.rglob("*.md"):
-            for line in md_file.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("## ") or line.startswith("### "):
-                    q = line.lstrip("#").strip()
-                    if q and not q.endswith("|"):  # 테이블 헤더 제외
-                        questions.append(q if q.endswith("?") else q + "?")
-        return questions
-
-    def calibrate(self, root_dir: str | None = None, sample_size: int = CALIBRATION_SAMPLE_SIZE) -> None:
-        """relevant(KorQuAD + ragdata 질문) / irrelevant(잡담 챗봇 질문) 샘플로 sparse/dense 점수의
-        "정상 범위"를 한 번만 측정해서 고정 정규화 기준(lo, hi)을 만든다."""
-        if CALIBRATION_CACHE.exists():
-            print("[hybrid] calibration 캐시 로드 중...")
-            self.norm_bounds = json.loads(CALIBRATION_CACHE.read_text())
-            return
-
-        print("[hybrid] calibration 계산 중... (최초 1회)")
-        korquad_qs = [q for _, q, _, _ in load_korquad_qa_pairs(root_dir)]
-        ragdata_qs = self._load_ragdata_questions()
-        print(f"[hybrid] relevant 질문: KorQuAD {len(korquad_qs):,}개 + ragdata {len(ragdata_qs):,}개")
-
-        # KorQuAD와 ragdata를 50:50으로 샘플링 — ragdata 도메인 쿼리가 calibration에 충분히 반영되도록.
-        half = sample_size // 2
-        random.Random(0).shuffle(korquad_qs)
-        random.Random(1).shuffle(ragdata_qs)
-        rel_sample = korquad_qs[:half] + (ragdata_qs[:half] if ragdata_qs else korquad_qs[half:sample_size])
-
-        chatbot_text = load_korean_chatbot_data()
-        irrelevant_qs = [line.split("\t")[0] for line in chatbot_text.split("\n") if "\t" in line]
-        random.Random(2).shuffle(irrelevant_qs)
-        irr_sample = irrelevant_qs[:sample_size]
-
-        def raw_best_scores(qs):
-            sparse, dense = [], []
-            for q in qs:
-                s, d = self._raw_scores(q)
-                sparse.append(s.max())
-                dense.append(d.max())
-            return np.array(sparse), np.array(dense)
-
-        rel_sparse, rel_dense = raw_best_scores(rel_sample)
-        irr_sparse, irr_dense = raw_best_scores(irr_sample)
-        self.norm_bounds = {
-            "sparse_lo": float(irr_sparse.mean()), "sparse_hi": float(rel_sparse.mean()),
-            "dense_lo": float(irr_dense.mean()), "dense_hi": float(rel_dense.mean()),
-        }
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        CALIBRATION_CACHE.write_text(json.dumps(self.norm_bounds))
-        print("[hybrid] calibration 캐시 저장 완료.")
-
-    @staticmethod
-    def _fixed_normalize(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
-        return np.clip((x - lo) / (hi - lo), 0.0, 1.0) if hi > lo else np.zeros_like(x)
-
     def _hybrid_scores(self, query: str) -> np.ndarray:
         if self.norm_bounds is None:
-            raise RuntimeError("calibrate()가 호출되지 않았습니다. build_hybrid_retriever()를 사용하세요.")
+            raise RuntimeError("norm_bounds가 없습니다. build_hybrid_retriever()를 사용하세요.")
         sparse, dense = self._raw_scores(query)
-        norm_sparse = self._fixed_normalize(sparse, self.norm_bounds["sparse_lo"], self.norm_bounds["sparse_hi"])
+        norm_sparse = _fixed_normalize(sparse, self.norm_bounds["sparse_lo"], self.norm_bounds["sparse_hi"])
         # dense calibration이 실패한 경우(hi==lo==0) sparse만 사용
         if self.norm_bounds["dense_hi"] <= self.norm_bounds["dense_lo"]:
             return norm_sparse
-        norm_dense = self._fixed_normalize(dense, self.norm_bounds["dense_lo"], self.norm_bounds["dense_hi"])
+        norm_dense = _fixed_normalize(dense, self.norm_bounds["dense_lo"], self.norm_bounds["dense_hi"])
         return self.alpha * norm_sparse + (1 - self.alpha) * norm_dense
 
     def best_match(self, query: str, rerank_k: int = RERANK_TOP_K) -> tuple[str, float]:
-        """hybrid 점수가 가장 높은 패시지를 반환.
-
-        Cross-Encoder 재정렬은 짧은 영어 약어 쿼리에서 오히려 품질을 낮추는 문제가 있어 제거.
-        """
+        """hybrid 점수가 가장 높은 패시지를 반환."""
         scores = self._hybrid_scores(query)
         best_idx = int(scores.argmax())
         return self.passages[best_idx], float(scores[best_idx])
@@ -188,7 +190,7 @@ def build_hybrid_retriever(root_dir: str | None = None, ragdata_dir: str | None 
     else:
         print("[hybrid] passages 빌드 중... (최초 1회)")
         pairs = load_korquad_qa_pairs(root_dir, include_train=True)
-        contexts = {context for context, _, _, _ in pairs}  # 문단 중복 제거
+        contexts = {context for context, _, _, _ in pairs}
         passages = []
         for context in contexts:
             passages.extend(chunk_context(context))
@@ -198,5 +200,5 @@ def build_hybrid_retriever(root_dir: str | None = None, ragdata_dir: str | None 
         print("[hybrid] passages 캐시 저장 완료.")
 
     retriever = HybridRetriever(passages, alpha=alpha)
-    retriever.calibrate(root_dir)
+    _calibrate(retriever, root_dir)
     return retriever

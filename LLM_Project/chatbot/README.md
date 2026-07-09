@@ -142,11 +142,14 @@ chatbot/
 ├── scripts/                    # 유틸리티 스크립트 (캘리브레이션, 임계값 검증 등)
 └── source/
     ├── app/                    # FastAPI 서빙 레이어
-    │   ├── app.py              # 진입점 + 라우터 등록
+    │   ├── app.py              # 진입점 + 라우터 등록 + GET / 엔드포인트
     │   ├── state.py            # 모델·체인·검색기 초기화 (서버 기동 시 1회)
+    │   ├── history.py          # 히스토리 영속화 (load/save/append, data/history/)
     │   ├── auth.py             # ID+PWD 로그인/사용자 생성
     │   ├── streaming.py        # SSE 헬퍼 (자동 라우팅 포함)
-    │   ├── ui.py               # 웹 UI (로그인 → 분할화면 채팅)
+    │   ├── static/             # 정적 파일 (/static/* 경로로 서빙)
+    │   │   ├── index.html      # 웹 UI (로그인 → 분할화면 채팅)
+    │   │   └── style.css       # 전체 스타일시트
     │   └── routers/            # chat.py (non-streaming) · stream.py (SSE)
     ├── llm/                    # LLM 래퍼
     │   ├── sop_llm.py          # SOP_GPT → LangChain LLM 래퍼
@@ -195,7 +198,7 @@ ANTHROPIC_API_KEY=...
 ## 실행
 
 ```bash
-uv sync                          # 의존성 설치
+uv sync                          # 의존성 설치 (최초 1회)
 ```
 
 ### Qwen3-1.7B 모델 파일 준비
@@ -204,14 +207,12 @@ uv sync                          # 의존성 설치
 
 **BF16 (QwenTransformers, 약 3.4GB)**
 ```bash
-# HuggingFace CLI
 pip install huggingface_hub
 huggingface-cli download Qwen/Qwen3-1.7B --local-dir source/model/qwen/Qwen3-1.7B
 ```
 
 **Q4_K_M GGUF (QwenGGUF, 약 1.1GB) — 권장**
 ```bash
-# HuggingFace에서 직접 다운로드
 huggingface-cli download Qwen/Qwen3-1.7B-GGUF \
   Qwen3-1.7B-Q4_K_M.gguf \
   --local-dir source/model/qwen/
@@ -219,15 +220,23 @@ huggingface-cli download Qwen/Qwen3-1.7B-GGUF \
 
 또는 [Qwen3-1.7B-GGUF](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF) 페이지에서 `Qwen3-1.7B-Q4_K_M.gguf`를 수동으로 받아 `source/model/qwen/`에 두면 됩니다.
 
-```bash
-# 웹 서버 (source/app/ 에서)
-uvicorn app:app --reload
+### 서버 실행
 
-# 모델 학습 (source/model/sop_model/ 에서)
-python main.py train             # Stage 1
-python main.py train_qa          # Stage 2
-python main.py train_span        # Stage 4
-python main.py train_dpo         # Stage 5 (테스트 필요 시 진행)
+```bash
+# source/app/ 디렉토리에서
+uv run uvicorn app:app
+# 또는 venv를 먼저 활성화한 경우
+source .venv/bin/activate && uvicorn app:app
+```
+
+### 모델 학습
+
+```bash
+# source/model/sop_model/ 디렉토리에서
+uv run python main.py train        # Stage 1
+uv run python main.py train_qa     # Stage 2
+uv run python main.py train_span   # Stage 4
+uv run python main.py train_dpo    # Stage 5 (테스트 필요 시 진행)
 ```
 
 ## API
