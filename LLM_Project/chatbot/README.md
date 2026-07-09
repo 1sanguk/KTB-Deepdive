@@ -227,7 +227,7 @@ uvicorn app:app --reload
 python main.py train             # Stage 1
 python main.py train_qa          # Stage 2
 python main.py train_span        # Stage 4
-python main.py train_dpo         # Stage 5 (진행 중)
+python main.py train_dpo         # Stage 5 (테스트 필요 시 진행)
 ```
 
 ## API
