@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -76,8 +77,46 @@ def load_korquad_qa_data(root_dir=None):
 
 
 def chunk_context(context, chunk_len=CHUNK_LEN):
-    """문단을 질문과 무관하게 겹치지 않는 chunk_len자 청크로 분할 (검색 인덱스용)."""
-    return [context[i:i + chunk_len] for i in range(0, len(context), chunk_len) if context[i:i + chunk_len].strip()]
+    """문단을 문장 경계로 분할 후 chunk_len자 이내로 묶는다.
+
+    마침표·느낌표·물음표 뒤 공백 또는 줄바꿈을 문장 경계로 인식해 단어가 청크 중간에
+    잘리지 않도록 한다. 단일 문장이 chunk_len을 초과하면 공백(단어) 기준으로 추가 분할한다.
+    """
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+|\n+', context) if s.strip()]
+
+    chunks = []
+    current = ""
+    for sent in sentences:
+        if not current:
+            current = sent
+        elif len(current) + 1 + len(sent) <= chunk_len:
+            current += " " + sent
+        else:
+            chunks.append(current)
+            current = sent
+    if current:
+        chunks.append(current)
+
+    result = []
+    for chunk in chunks:
+        if len(chunk) <= chunk_len:
+            result.append(chunk)
+        else:
+            # 단일 문장이 chunk_len 초과 → 공백 기준으로 추가 분할
+            words = chunk.split()
+            sub = ""
+            for word in words:
+                if not sub:
+                    sub = word
+                elif len(sub) + 1 + len(word) <= chunk_len:
+                    sub += " " + word
+                else:
+                    result.append(sub)
+                    sub = word
+            if sub:
+                result.append(sub)
+
+    return [c for c in result if c.strip()]
 
 
 def answer_window(context, answer_start, answer_text, chunk_len=CHUNK_LEN):

@@ -4,9 +4,9 @@
 참고: Rafailov et al., 2023 — https://arxiv.org/abs/2305.18290
 
 학습 데이터 전략:
-  - chosen  : 데이터셋의 정답 답변
-  - rejected: 동일 배치 내 다른 질문의 답변을 섞어 부적절한 응답으로 사용
-               (인퍼런스 없이 데이터셋만으로 선호 쌍을 만들 수 있어 경량)
+  - chosen  : KorQuAD 정답 (인간이 작성한 답변)
+  - rejected: SOP_GPT_qa가 RAG 없이 생성한 오답
+  scripts/make_dpo_data.py로 사전 생성한 dpo_data.json을 사용한다.
 """
 
 import copy
@@ -60,16 +60,16 @@ def _dpo_loss(
     return -F.logsigmoid(beta * ratio)
 
 
-def _make_batch(pairs: list[tuple[str, str]], batch_size: int, stoi, merges, base_set):
-    """pairs에서 batch_size개의 (prompt, chosen, rejected) 인코딩 트리플을 생성."""
-    batch = random.sample(pairs, min(batch_size, len(pairs)))
-    # rejected는 배치 내에서 순환 이동(circular shift)으로 만들어 다른 질문의 답변을 붙임
-    shuffled = batch[1:] + batch[:1]
+def _make_batch(triples: list[dict], batch_size: int, stoi, merges, base_set):
+    """triples에서 batch_size개를 샘플링해 (prompt_ids, chosen_ids, rejected_ids) 리스트 반환.
 
+    triple 형식: {"question": str, "chosen": str, "rejected": str}
+    """
+    batch = random.sample(triples, min(batch_size, len(triples)))
     result = []
-    for (q, a_chosen), (_, a_rejected) in zip(batch, shuffled):
-        p_ids, c_ids = _encode_qa(q, a_chosen,  stoi, merges, base_set)
-        _,      r_ids = _encode_qa(q, a_rejected, stoi, merges, base_set)
+    for item in batch:
+        p_ids, c_ids = _encode_qa(item["question"], item["chosen"],  stoi, merges, base_set)
+        _,     r_ids = _encode_qa(item["question"], item["rejected"], stoi, merges, base_set)
         if not c_ids or not r_ids:
             continue
         result.append((p_ids, c_ids, r_ids))
@@ -78,7 +78,7 @@ def _make_batch(pairs: list[tuple[str, str]], batch_size: int, stoi, merges, bas
 
 def run_dpo(
     policy_model,
-    pairs: list[tuple[str, str]],
+    triples: list[dict],
     stoi: dict,
     itos: dict,
     merges: dict,
@@ -89,11 +89,13 @@ def run_dpo(
     batch_size: int = 4,
     ckpt_path: str = "SOP_GPT_dpo.pt",
     eval_every: int = 50,
+    patience: int = 5,
 ):
     """DPO 학습 루프.
 
     policy_model : Stage 2 가중치가 로드된 SOP_GPT (학습됨)
-    pairs        : (question, answer) 리스트 — chosen 기준
+    triples      : {"question", "chosen", "rejected"} dict 리스트
+                   scripts/make_dpo_data.py로 사전 생성한 dpo_data.json을 사용
     """
     # 레퍼런스 모델: policy와 동일한 초기 가중치, gradient 없음
     ref_model = copy.deepcopy(policy_model)
@@ -104,13 +106,14 @@ def run_dpo(
     policy_model.train()
     opt = torch.optim.AdamW(policy_model.parameters(), lr=lr)
 
-    random.shuffle(pairs)
-    n_train = int(0.9 * len(pairs))
-    train_pairs, val_pairs = pairs[:n_train], pairs[n_train:]
+    random.shuffle(triples)
+    n_train = int(0.9 * len(triples))
+    train_pairs, val_pairs = triples[:n_train], triples[n_train:]
 
     best_val, best_state = float("inf"), None
+    no_improve = 0
 
-    print(f"[dpo] {len(train_pairs):,} train / {len(val_pairs):,} val pairs, β={beta}, lr={lr}")
+    print(f"[dpo] {len(train_pairs):,} train / {len(val_pairs):,} val pairs, β={beta}, lr={lr}, patience={patience}")
 
     for step in range(steps):
         batch = _make_batch(train_pairs, batch_size, stoi, merges, base_set)
@@ -150,6 +153,12 @@ def run_dpo(
             if val_loss < best_val:
                 best_val = val_loss
                 best_state = {k: v.cpu().clone() for k, v in policy_model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    print(f"[dpo] early stopping at step {step} (val not improved for {patience} evals)")
+                    break
 
     if best_state is not None:
         policy_model.load_state_dict({k: v.to(device) for k, v in best_state.items()})

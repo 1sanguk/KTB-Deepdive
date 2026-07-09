@@ -4,6 +4,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.memory import MemorySaver
 
+from llm.qwen_llm import QwenBase
+
 from lg.nodes import (
     make_retriever_node,
     make_grade_node,
@@ -11,12 +13,14 @@ from lg.nodes import (
     make_generate_direct_node,
     make_generate_claude_context_node,
     make_generate_claude_direct_node,
+    make_generate_qwen_context_node,
+    make_generate_qwen_direct_node,
     make_claude_agent_node,
     make_tool_executor_node,
 )
 from lg.models import GraphState, AgentState
 from lc.retriever import HybridRetriever
-from lc.llm import SOP_GPT_LLM
+from llm.sop_llm import SOP_GPT_LLM
 
 # 최대 재시도 횟수: thresholds 길이 - 1 과 맞춰야 의미가 있다.
 MAX_RETRIES = 2
@@ -97,6 +101,43 @@ def build_claude_graph(retriever: HybridRetriever, threshold: list[float], check
     graph.add_node("grade",           make_grade_node(threshold))
     graph.add_node("generate_span",   make_generate_claude_context_node())
     graph.add_node("generate_direct", make_generate_claude_direct_node())
+    graph.add_node("increment_retry", increment_retry)
+
+    graph.set_entry_point("init")
+
+    graph.add_edge("init",            "retrieve")
+    graph.add_edge("retrieve",        "grade")
+    graph.add_edge("increment_retry", "retrieve")
+
+    graph.add_conditional_edges(
+        "grade",
+        _route,
+        {
+            "span":   "generate_span",
+            "direct": "generate_direct",
+            "retry":  "increment_retry",
+        },
+    )
+
+    graph.add_edge("generate_span",   END)
+    graph.add_edge("generate_direct", END)
+
+    return graph.compile(checkpointer=checkpointer)
+
+
+def build_qwen_graph(retriever: HybridRetriever, qwen_llm: QwenBase, threshold: list[float], checkpointer: Optional[MemorySaver] = None) -> CompiledStateGraph:
+    """Qwen GGUF 기반 LangGraph 파이프라인.
+
+    Claude 그래프와 동일한 구조(init → retrieve → grade → generate)이며
+    generate 노드만 Qwen 모델로 교체된다.
+    """
+    graph = StateGraph(GraphState)
+
+    graph.add_node("init",            _init_graph_state)
+    graph.add_node("retrieve",        make_retriever_node(retriever))
+    graph.add_node("grade",           make_grade_node(threshold))
+    graph.add_node("generate_span",   make_generate_qwen_context_node(qwen_llm))
+    graph.add_node("generate_direct", make_generate_qwen_direct_node(qwen_llm))
     graph.add_node("increment_retry", increment_retry)
 
     graph.set_entry_point("init")

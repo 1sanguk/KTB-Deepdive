@@ -2,8 +2,9 @@ from typing import Callable
 
 from lg.models import GraphState, AgentState
 from lc.retriever import HybridRetriever
-from lc.llm import SOP_GPT_LLM
-from lc.claude_llm import ask_claude, ask_claude_with_context, call_claude_agent_sync
+from llm.sop_llm import SOP_GPT_LLM
+from llm.claude_llm import ask_claude, ask_claude_with_context, call_claude_agent_sync
+from llm.qwen_llm import QwenBase
 
 
 # ── SOP_GPT 노드 ───────────────────────────────────────────────────────────────
@@ -125,4 +126,19 @@ def make_tool_executor_node(retriever: HybridRetriever) -> Callable[[AgentState]
     return tool_executor
 
 
+# ── Qwen 노드 ──────────────────────────────────────────────────────────────────
 
+def make_generate_qwen_context_node(qwen_llm: QwenBase) -> Callable[[GraphState], GraphState]:
+    """RAG 경로: 검색 문서를 컨텍스트로 Qwen에 질문하는 노드를 반환."""
+    def generate_context(state: GraphState) -> dict:
+        answer = qwen_llm.ask_with_context(state['query'], state['documents'][0])
+        return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
+    return generate_context
+
+
+def make_generate_qwen_direct_node(qwen_llm: QwenBase) -> Callable[[GraphState], GraphState]:
+    """직접 답변 경로: 문서 없이 Qwen에 질문하는 노드를 반환."""
+    def generate_direct(state: GraphState) -> dict:
+        answer = qwen_llm.ask(state['query'])
+        return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
+    return generate_direct

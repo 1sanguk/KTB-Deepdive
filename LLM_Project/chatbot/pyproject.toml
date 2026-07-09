@@ -1,0 +1,29 @@
+[project]
+name = "ktb-minigpt-chatbot"
+version = "0.1.0"
+description = "Korean Mini-GPT Chatbot with RAG, LangChain, LangGraph"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.115.0",
+    "faiss-cpu>=1.14.3",
+    "fastapi>=0.136.3",
+    "httpx>=0.28.1",
+    "korpora>=0.2.0",
+    "langchain>=0.3.25",
+    "langchain-community>=0.3.7",
+    "langchain-core>=0.3.86",
+    "langchain-huggingface>=0.2.0",
+    "llama-cpp-python>=0.3.33",
+    "numpy>=1.26.4",
+    "psutil>=7.2.2",
+    "pydantic>=2.13.4",
+    "python-multipart>=0.0.29",
+    "rank-bm25>=0.2.2",
+    "scikit-learn>=1.8.0",
+    "sentence-transformers>=5.6.0",
+    "torch>=2.12.0",
+    "transformers>=5.12.1",
+    "uvicorn>=0.40.0",
+]
+
+[tool.uv]

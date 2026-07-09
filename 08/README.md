@@ -174,7 +174,7 @@ MCP가 로컬 터미널에서 직접 명령어를 실행할 수 있다고 가정
 
 ```
 위험한 명령어 예시:
-run_shell_command, execute_python, npm_install, git_push, docker_run
+run_shell_command, execute_python, npm_install, git_push, docker_run, rmdir -rf, shutdown
 ```
 
 이런 명령어는 유저에게 편리하지만 위험하므로 제한하거나 격리해야 한다.

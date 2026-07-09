@@ -21,7 +21,7 @@ from bpe import train_bpe, build_vocab, base_alphabet, encode, decode, save_bpe,
 from train_utils import make_batcher, train_loop, get_lr
 
 # rag/ 패키지와 langchain/ 디렉토리(서빙용 검색기)를 모듈 검색 경로에 추가한다.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 import rag
 from lc.retriever import build_hybrid_retriever
 
@@ -213,14 +213,26 @@ def train_stage4(model):
 
 
 def train_dpo(model):
-    """Stage 5: DPO로 선호 응답 학습. Stage 2 가중치에서 시작한다."""
+    """Stage 5: DPO로 선호 응답 학습. Stage 2 가중치에서 시작한다.
+
+    사전에 scripts/make_dpo_data.py를 실행해 dpo_data.json을 생성해야 한다.
+    """
+    import json
     from dpo import run_dpo
+
+    dpo_data_path = Path(__file__).resolve().parent / "dpo_data.json"
+    if not dpo_data_path.exists():
+        print(f"[dpo] ERROR: {dpo_data_path} 없음.")
+        print("[dpo] 먼저 'cd source && python ../scripts/make_dpo_data.py' 를 실행하세요.")
+        return
+
+    triples = json.loads(dpo_data_path.read_text(encoding="utf-8"))
+    print(f"[dpo] {len(triples):,}쌍 로드 완료: {dpo_data_path}")
+
     model.load_state_dict(torch.load(QA_CKPT, map_location=device))
     print(f"[dpo] loaded {QA_CKPT} as policy init")
-    pairs = load_chatbot_qa_pairs()
-    korquad_pairs = [(q, a) for _, q, a, _ in rag.load_korquad_qa_pairs()]
-    all_pairs = pairs + korquad_pairs
-    run_dpo(model, all_pairs, stoi, itos, merges, base_set,
+
+    run_dpo(model, triples, stoi, itos, merges, base_set,
             steps=DPO_STEPS, lr=DPO_LR, beta=DPO_BETA, ckpt_path=DPO_CKPT)
 
 

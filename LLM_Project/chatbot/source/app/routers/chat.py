@@ -2,7 +2,7 @@ from fastapi import APIRouter, Query
 
 import state
 from auth import login_or_register
-from lc.claude_llm import ask_claude
+from llm.claude_llm import ask_claude
 from models import AuthRequest, AuthResponse, ChatRequest, ChatResponse, GenerateRequest, GenerateResponse
 
 router = APIRouter()

@@ -20,7 +20,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / ".env")
 load_dotenv(_ROOT / "api_keys")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "model"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "model" / "sop_model"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import torch
@@ -29,14 +29,14 @@ from langsmith.evaluation import evaluate
 
 from bpe import build_vocab, base_alphabet, load_bpe
 from model import device, SOP_GPT, SOP_GPT_Span
-from lc.llm import SOP_GPT_LLM, make_span_extractor
+from llm.sop_llm import SOP_GPT_LLM, make_span_extractor
 from lc.chain import build_basic_chain, build_rag_chain
 from lc.retriever import build_hybrid_retriever
 from rag.rag import build_tfidf_retriever, load_korquad_qa_pairs
 from lg.graph import build_graph
 
 # ── 설정 ───────────────────────────────────────────────────────────────────────
-MODEL_DIR        = Path(__file__).resolve().parent / "model"
+MODEL_DIR        = Path(__file__).resolve().parent / "model" / "sop_model"
 DATASET_NAME     = "sop-gpt-korquad"
 EVAL_SAMPLES     = 30   # 평가에 쓸 KorQuAD 예제 수 (추론이 느리므로 소규모로)
 RAG_THRESHOLD    = 0.515

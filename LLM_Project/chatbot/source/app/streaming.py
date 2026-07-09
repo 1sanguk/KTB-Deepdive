@@ -7,8 +7,8 @@ import threading
 from typing import Any, AsyncGenerator, Callable
 
 from lc.chain import _expand_span
-from lc.claude_llm import stream_claude
-from lc.llm import SOP_GPT_LLM
+from llm.claude_llm import stream_claude
+from llm.sop_llm import SOP_GPT_LLM
 from langgraph.graph.state import CompiledStateGraph
 
 

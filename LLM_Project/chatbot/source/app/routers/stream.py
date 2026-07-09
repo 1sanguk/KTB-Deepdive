@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
 import state
-from lc.claude_llm import stream_claude
+from llm.claude_llm import stream_claude
 from models import ChatRequest
 from streaming import _sse, sop_stream, sop_rag_stream, sop_lg_stream, claude_rag_stream, with_history, auto_sop_stream, auto_claude_stream
 
@@ -116,5 +116,23 @@ async def chat_auto_stream(req: ChatRequest) -> StreamingResponse:
 async def chat_claude_auto_stream(req: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         auto_claude_stream(req.question, req.thread_id),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/qwen/langgraph/stream")
+async def chat_qwen_langgraph_stream(req: ChatRequest) -> StreamingResponse:
+    qwen_tid = (req.thread_id + ":bf16") if req.thread_id else None
+    return StreamingResponse(
+        sop_lg_stream(state.qwen_graph, req.question, thread_id=qwen_tid),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/qwen-q/langgraph/stream")
+async def chat_qwen_quant_langgraph_stream(req: ChatRequest) -> StreamingResponse:
+    qwen_tid = (req.thread_id + ":q4") if req.thread_id else None
+    return StreamingResponse(
+        sop_lg_stream(state.qwen_quant_graph, req.question, thread_id=qwen_tid),
         media_type="text/event-stream",
     )

@@ -18,7 +18,7 @@ _HTML = """<!DOCTYPE html>
       display: flex;
       justify-content: center;
     }
-    .app { width: 100%; max-width: 1100px; display: flex; flex-direction: column; height: 100vh; }
+    .app { width: 100%; max-width: 1600px; display: flex; flex-direction: column; height: 100vh; }
 
     /* ── 로그인 화면 ── */
     #login-view {
@@ -122,7 +122,7 @@ _HTML = """<!DOCTYPE html>
       overflow: hidden;
       min-width: 0;
     }
-    .split-panel:first-child { border-right: 1px solid #e5e5e5; }
+    .split-panel:not(:last-child) { border-right: 1px solid #e5e5e5; }
     .split-label {
       padding: 8px 16px;
       font-size: 12px;
@@ -133,6 +133,8 @@ _HTML = """<!DOCTYPE html>
     }
     .split-label.sop { color: #2563eb; }
     .split-label.claude { color: #7c3aed; }
+    .split-label.qwen { color: #059669; }
+    .split-label.qwen-q { color: #d97706; }
 
     .messages {
       flex: 1;
@@ -154,6 +156,8 @@ _HTML = """<!DOCTYPE html>
     .msg.user      { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; }
     .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #e5e5e5; border-bottom-left-radius: 4px; }
     .msg.assistant.claude-msg { border-color: #ddd5fe; }
+    .msg.assistant.qwen-msg   { border-color: #a7f3d0; }
+    .msg.assistant.qwen-q-msg { border-color: #fde68a; }
     .msg.loading   { color: #aaa; font-style: italic; }
     .msg.history   { opacity: 0.75; }
     .route-badge {
@@ -206,6 +210,8 @@ _HTML = """<!DOCTYPE html>
     }
     .input-area button:hover { background: #1d4ed8; }
     .input-area button:disabled { background: #93b4f5; cursor: default; }
+    #send-btn.stopping { background: #ef4444; }
+    #send-btn.stopping:hover { background: #dc2626; }
   </style>
 </head>
 <body>
@@ -215,7 +221,7 @@ _HTML = """<!DOCTYPE html>
     <div id="login-view">
       <div>
         <h1>SOP_GPT 한국어 챗봇</h1>
-        <p style="color:#666; font-size:13px; margin-top:8px;">자동 라우팅 모드 — 질문에 맞는 체인을 자동으로 선택합니다.</p>
+        <p style="color:#666; font-size:13px; margin-top:8px;">자동 라우팅 모드 — 질문에 맞는 모드를 자동으로 선택합니다.</p>
       </div>
 
       <div class="login-card">
@@ -233,7 +239,7 @@ _HTML = """<!DOCTYPE html>
     <div id="chat-view">
       <div class="chat-header">
         <button class="back-btn" onclick="goBack()">← 나가기</button>
-        <span id="chat-title">자동 라우팅 채팅</span>
+        <span id="chat-title">SOP GPT</span>
         <span id="chat-user-id"></span>
       </div>
       <div class="split-container">
@@ -245,10 +251,18 @@ _HTML = """<!DOCTYPE html>
           <div class="split-label claude">✨ Claude (Haiku)</div>
           <div class="messages" id="messages-claude"></div>
         </div>
+        <div class="split-panel">
+          <div class="split-label qwen">🟢 Qwen3-1.7B (BF16)</div>
+          <div class="messages" id="messages-qwen"></div>
+        </div>
+        <div class="split-panel">
+          <div class="split-label qwen-q">🟡 Qwen3-1.7B (Q4)</div>
+          <div class="messages" id="messages-qwen-q"></div>
+        </div>
       </div>
       <div class="input-area">
         <input id="msg-input" placeholder="질문을 입력하세요" autocomplete="off">
-        <button id="send-btn" onclick="send()">전송</button>
+        <button id="send-btn" onclick="sendOrStop()">전송</button>
       </div>
     </div>
 
@@ -257,8 +271,9 @@ _HTML = """<!DOCTYPE html>
   <script>
     let currentUserId = '';
     let pendingCount = 0;
+    let abortController = null;
 
-    // 단기 메모리: userId → {sop: innerHTML, claude: innerHTML}
+    // 단기 메모리: userId → {sop, claude, qwen, qwenQ}
     const sessionCache = new Map();
 
     async function enterChat() {
@@ -304,11 +319,15 @@ _HTML = """<!DOCTYPE html>
 
         const cached = sessionCache.get(userId);
         if (cached) {
-          document.getElementById('messages-sop').innerHTML   = cached.sop;
+          document.getElementById('messages-sop').innerHTML    = cached.sop;
           document.getElementById('messages-claude').innerHTML = cached.claude;
+          document.getElementById('messages-qwen').innerHTML   = cached.qwen;
+          document.getElementById('messages-qwen-q').innerHTML = cached.qwenQ;
         } else {
-          document.getElementById('messages-sop').innerHTML   = '';
+          document.getElementById('messages-sop').innerHTML    = '';
           document.getElementById('messages-claude').innerHTML = '';
+          document.getElementById('messages-qwen').innerHTML   = '';
+          document.getElementById('messages-qwen-q').innerHTML = '';
           await loadHistory(userId);
         }
 
@@ -327,6 +346,8 @@ _HTML = """<!DOCTYPE html>
         sessionCache.set(currentUserId, {
           sop:    document.getElementById('messages-sop').innerHTML,
           claude: document.getElementById('messages-claude').innerHTML,
+          qwen:   document.getElementById('messages-qwen').innerHTML,
+          qwenQ:  document.getElementById('messages-qwen-q').innerHTML,
         });
       }
       document.getElementById('login-view').style.display = 'flex';
@@ -335,15 +356,23 @@ _HTML = """<!DOCTYPE html>
 
     async function loadHistory(userId) {
       try {
-        const [sopData, claudeData] = await Promise.all([
+        const [sopData, claudeData, qwenData, qwenQData] = await Promise.all([
           fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId)}`).then(r => r.json()),
           fetch(`/chat/claude/auto/history?thread_id=${encodeURIComponent(userId)}`).then(r => r.json()),
+          fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId + ':bf16')}`).then(r => r.json()),
+          fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId + ':q4')}`).then(r => r.json()),
         ]);
         for (const msg of (sopData.messages || [])) {
           addMsg('messages-sop', msg.role === 'user' ? 'user' : 'assistant history', msg.content);
         }
         for (const msg of (claudeData.messages || [])) {
           addMsg('messages-claude', msg.role === 'user' ? 'user' : 'assistant claude-msg history', msg.content);
+        }
+        for (const msg of (qwenData.messages || [])) {
+          addMsg('messages-qwen', msg.role === 'user' ? 'user' : 'assistant qwen-msg history', msg.content);
+        }
+        for (const msg of (qwenQData.messages || [])) {
+          addMsg('messages-qwen-q', msg.role === 'user' ? 'user' : 'assistant qwen-q-msg history', msg.content);
         }
       } catch (_) {}
     }
@@ -376,23 +405,39 @@ _HTML = """<!DOCTYPE html>
       box.scrollTop = box.scrollHeight;
     }
 
+    function sendOrStop() {
+      if (pendingCount > 0) {
+        if (abortController) abortController.abort();
+      } else {
+        send();
+      }
+    }
+
     async function send() {
       const input    = document.getElementById('msg-input');
       const btn      = document.getElementById('send-btn');
       const question = input.value.trim();
-      if (!question || !currentUserId || pendingCount > 0) return;
+      if (!question || !currentUserId) return;
 
       addMsg('messages-sop',    'user', question);
       addMsg('messages-claude', 'user', question);
+      addMsg('messages-qwen',   'user', question);
+      addMsg('messages-qwen-q', 'user', question);
       input.value = '';
-      btn.disabled = true;
-      pendingCount = 2;
+      btn.textContent = '정지';
+      btn.classList.add('stopping');
+      pendingCount = 4;
 
-      streamPanelWith('/chat/auto/stream',        question, 'messages-sop',    'assistant');
-      streamPanelWith('/chat/claude/auto/stream', question, 'messages-claude', 'assistant claude-msg');
+      abortController = new AbortController();
+      const signal = abortController.signal;
+
+      streamPanelWith('/chat/auto/stream',               question, 'messages-sop',    'assistant',            signal);
+      streamPanelWith('/chat/claude/auto/stream',        question, 'messages-claude', 'assistant claude-msg', signal);
+      streamPanelWith('/chat/qwen/langgraph/stream',     question, 'messages-qwen',   'assistant qwen-msg',   signal);
+      streamPanelWith('/chat/qwen-q/langgraph/stream',   question, 'messages-qwen-q', 'assistant qwen-q-msg', signal);
     }
 
-    async function streamPanelWith(endpoint, question, containerId, msgClass) {
+    async function streamPanelWith(endpoint, question, containerId, msgClass, signal) {
       const box = document.getElementById(containerId);
       const statusDiv = addMsg(containerId, 'assistant loading', '분류 중…');
       let answerDiv = null;
@@ -403,6 +448,7 @@ _HTML = """<!DOCTYPE html>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ question, thread_id: currentUserId || null }),
+          signal,
         });
 
         const reader  = res.body.getReader();
@@ -442,13 +488,19 @@ _HTML = """<!DOCTYPE html>
           }
         }
       } catch (e) {
-        statusDiv.textContent = '오류가 발생했습니다.';
-        statusDiv.className = 'msg ' + msgClass;
+        if (e.name === 'AbortError') {
+          statusDiv.textContent = '중단됨';
+        } else {
+          statusDiv.textContent = '오류가 발생했습니다.';
+          statusDiv.className = 'msg ' + msgClass;
+        }
       } finally {
         if (routeLabel) addRouteBadge(containerId, routeLabel);
         pendingCount--;
         if (pendingCount === 0) {
-          document.getElementById('send-btn').disabled = false;
+          const btn = document.getElementById('send-btn');
+          btn.textContent = '전송';
+          btn.classList.remove('stopping');
           document.getElementById('msg-input').focus();
         }
       }

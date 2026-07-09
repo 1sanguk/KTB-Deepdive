@@ -13,7 +13,7 @@ load_dotenv(_ROOT / "api_keys")
 
 # 프로젝트 내 패키지 경로 등록 (state, routers 등의 import보다 먼저)
 _SOURCE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_SOURCE / "model"))
+sys.path.insert(0, str(_SOURCE / "model" / "sop_model"))
 sys.path.insert(0, str(_SOURCE))
 
 from fastapi import FastAPI

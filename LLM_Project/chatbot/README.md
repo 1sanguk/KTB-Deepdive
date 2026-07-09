@@ -1,305 +1,260 @@
-# 한국어 Mini-GPT 챗봇
+# RPG·게임 특화 한국어 Mini-GPT 챗봇
 
-자모(NFD) 단위 BPE 토크나이저부터 GPT 아키텍처, 학습, RAG, LangChain/LangGraph 파이프라인, Claude API 연동, FastAPI 서빙까지 전부 직접 구현한 한국어 챗봇 프로젝트.
+BPE 토크나이저 → GPT 학습 → RAG → LangChain/LangGraph 파이프라인 → Claude/Qwen 연동까지 전 과정 직접 구현한 한국어 챗봇.  
+지식 베이스(`ragdata/`)를 **RPG·게임** 도메인으로 채워, 게임 장르·시스템·직군 관련 질문에 특화하여 답변한다.
 
-## 개요
-> 체크포인트 3개(`SOP_GPT.pt` / `SOP_GPT_qa.pt` / `SOP_GPT_span.pt`)가 역할을 나눠 쓰이는 구조.  
-> **자동 라우팅 모드**: ID+비밀번호로 로그인하면 질문의 성격(잡담/사실형/일반)을 Claude Haiku가 자동 분류해 가장 적합한 체인(basic/langchain/langgraph)으로 라우팅. SOP_GPT와 Claude를 좌/우 분할화면으로 동시에 비교 가능.
+## 특징
 
-![STEP 1 – Basic GPT Chatbot](images/basic.png)
+| 항목 | 내용 |
+|---|---|
+| 모델 | SOP_GPT (~97M, GPT-2 디코더) · Qwen3-1.7B (BF16/Q4_K_M) · Claude Haiku |
+| 검색 | TF-IDF / BM25+FAISS 하이브리드 + calibrate 정규화 |
+| 파이프라인 | LCEL 체인 · LangGraph StateGraph (retry 루프, 최대 2회) |
+| 자동 라우팅 | Claude Haiku가 질문 유형 분류(chit_chat/factual/general) → 체인 자동 선택 |
+| UI | SOP_GPT ↔ Claude 분할화면 + Qwen3 패널 + SSE 실시간 스트리밍 |
+| 서빙 | FastAPI + LangSmith 트레이싱 (APAC 엔드포인트) |
 
-- **토크나이저**: 한글을 NFD로 분해(초성/중성/종성 자모)한 뒤 BPE 적용, NFC로 재조합해 출력 (직접 구현)
-- **모델**: `CausalSelfAttention` / `Block` / `SOP_GPT`로 구성된 GPT 디코더 (block_size=256, n_embd=768, n_head=12, n_layer=12, ~97M params)
-- **학습 단계**
-  - **Stage 1 (이어쓰기)**: kowikitext + 한국어 챗봇 Q&A 데이터 + AI Hub 한국어 대화 데이터로 다음 토큰 예측 학습
-  - **Stage 2 (Q&A 응답)**: songys/Chatbot_data(11,823쌍) + KorQuAD로 `"질문: ...\n답변: ..."` 포맷 파인튜닝
-  - **Stage 4 (추출형 RAG QA)**: KorQuAD v1.0으로 정답의 시작/끝 토큰 **위치를 분류**하는 `SOP_GPT_Span` 학습
-  - **Stage 5 (DPO)**: chosen/rejected 쌍으로 모델 선호 방향 정렬 (진행 중)
-- **학습 최적화**: bf16 혼합 정밀도(`torch.autocast`), gradient accumulation, cosine LR decay
-- **KV Cache**: 추론 시 K/V 텐서를 캐시해 증분 디코딩 — 반복 prefill 없이 마지막 토큰만 처리
-- **생성**: temperature / top-k / top-p / repetition penalty 샘플링 + 종결 토큰(`.`/`?`/`!`) 기준 stop 조건 + SSE 스트리밍
-- **LangChain 파이프라인**: `SOP_GPT`를 `BaseLLM`으로 래핑하고 LCEL로 검색기와 연결. 검색 방식(TF-IDF / BM25+FAISS)에 따라 체인을 교체할 수 있는 구조
-- **LangGraph 파이프라인**: `StateGraph`로 검색→평가→재시도→생성 흐름을 명시적 그래프로 표현. 임계값을 단계적으로 완화하는 retry 루프 내장
-- **Claude API 연동**: 동일한 검색기를 재사용하고 답변 생성만 `claude-haiku-4-5-20251001`으로 교체. SOP_GPT와 실시간 비교 가능
-- **자동 라우팅**: Claude Haiku(temperature=0)가 질문을 `chit_chat / factual / general` 세 가지로 분류해 `basic / langgraph / langchain` 체인을 자동 선택 (`source/lc/router.py`)
-- **로그인 시스템**: ID+비밀번호 입력 → 신규 ID면 자동 생성, 기존 ID면 비밀번호 검증. 동일 ID에 하나의 비밀번호만 허용 (`source/app/auth.py`)
-- **서빙**: FastAPI로 채팅 엔드포인트 + SSE 스트리밍 엔드포인트 제공 + 분할화면 웹 UI
-- **트레이싱**: LangSmith로 체인 실행 기록 자동 수집 (APAC 엔드포인트)
+---
 
 ## 학습 파이프라인
 
 ![학습 파이프라인](images/train.png)
 
-## 모델 아키텍처 (`source/model/model.py`)
+단계를 나눈 이유는 각 Stage가 서로 다른 능력을 순서대로 쌓기 위해서다. 처음부터 Q&A 포맷으로만 학습하면 언어 자체를 충분히 익히지 못한 채 형식만 흉내 내는 모델이 된다. 먼저 대규모 텍스트로 언어 패턴을 익힌 뒤(Stage 1), 그 위에 태스크를 순차적으로 올리는 전이학습 구조다.
+
+| Stage | 역할 | 결과물 | 단계를 나눈 이유 |
+|---|---|---|---|
+| Stage 1 | 이어쓰기 (kowikitext + 챗봇 Q&A + AI Hub 대화) | `SOP_GPT.pt` | 베이스 언어 능력 확보. 다음 토큰 예측으로 어휘·문법·문맥을 먼저 학습 |
+| Stage 2 | Q&A 파인튜닝 (`"질문: …\n답변: …"` 포맷) | `SOP_GPT_qa.pt` | 언어 능력 위에 질문→답변 형식을 추가 학습. Stage 1 없이 하면 형식만 흉내 냄 |
+| Stage 4 | 추출형 RAG QA — `SOP_GPT_Span`이 정답의 시작/끝 토큰 위치 분류 | `SOP_GPT_span.pt` | RAG 컨텍스트가 주어졌을 때 생성보다 추출이 더 정확. 소규모 모델로 긴 문장을 생성하면 품질이 떨어지므로 분류 태스크로 전환 |
+| Stage 5 | DPO 선호 정렬 | `SOP_GPT_dpo.pt` | 지도학습만으로는 "더 나은 답변"을 구별 못 함. chosen/rejected 쌍으로 선호 방향을 정렬. **실험 결과**: KorQuAD GT(명사구) vs 모델 오답(단어)은 스타일 불일치로 성능 저하. 챗봇 데이터(대화체 일치)로 val loss 0.0250까지 개선됐으나 실제 파이프라인 수치 변화 없음. 이유는 두 가지 — ① 추론 경로의 핵심이 Span 모델이라 QA 모델 DPO가 파이프라인에 영향을 주지 못함, ② 91M 소규모 모델에서 DPO는 이미 정답을 생성할 수 있는 능력이 전제되어야 함. 현 단계 `SOP_GPT_qa.pt` 유지. |
+
+**최적화**: bf16 혼합 정밀도(`torch.autocast`) · gradient accumulation · KV Cache 증분 디코딩
+
+---
+
+## 모델 아키텍처
 
 학습된 가중치(.pt)는 용량 문제로 저장소에 포함되지 않습니다.
 
-### SOP_GPT — 이어쓰기 / QA 생성 모델
+### SOP_GPT — 이어쓰기 / QA 생성
 
-GPT-2와 동일한 디코더 전용 Transformer. Pre-norm(LayerNorm → Attention) 구조로 학습 안정성을 높였다.
-
-```
-tok_emb  : Embedding(vocab_size → 768)   # 토큰 임베딩
-pos_emb  : Embedding(256 → 768)          # 위치 임베딩 (학습 가능)
-blocks   : 12 × Block                    # Transformer 디코더 블록
-  └─ CausalSelfAttention                 #   인과적 멀티헤드 어텐션 (12 heads, head_dim=64)
-  └─ MLP (768→3072→768, GELU)           #   피드포워드
-ln_f     : LayerNorm                     # 최종 정규화
-head     : Linear(768 → vocab_size)      # 다음 토큰 확률 (tok_emb와 weight tying)
-```
+GPT-2와 동일한 Pre-norm 디코더 전용 Transformer.
 
 | 하이퍼파라미터 | 값 |
 |---|---|
-| block_size (컨텍스트 길이) | 256 |
-| n_embd (임베딩 차원) | 768 |
-| n_head (어텐션 헤드) | 12 |
-| n_layer (블록 수) | 12 |
+| block_size | 256 |
+| n_embd | 768 |
+| n_head / n_layer | 12 / 12 |
 | 파라미터 수 | ~97M |
 
-**KV Cache**: 추론 시 각 블록의 K/V 텐서를 캐시해 마지막 토큰 1개만 처리하는 증분 디코딩 적용. prefill 이후 속도를 대폭 단축.
+### SOP_GPT_Span — 추출형 QA
 
-**생성 옵션**: temperature / top-k / top-p (nucleus sampling) / repetition penalty / stop tokens
+SOP_GPT 본체에 `qa_head: Linear(768 → 2)`를 달아 참고 문단 안에서 정답의 시작/끝 위치를 분류한다.  
+생성이 아닌 분류 태스크이므로 오류 누적 없이 작은 모델로도 정확한 위치를 찾을 수 있다.
 
-### SOP_GPT_Span — 추출형 QA 모델
+| 파일 | 역할 |
+|---|---|
+| `SOP_GPT.pt` | Stage 1 — 자유 텍스트 이어쓰기 |
+| `SOP_GPT_qa.pt` | Stage 2 — RAG 미달 시 직접 답변 |
+| `SOP_GPT_span.pt` | Stage 4 — RAG 성공 시 컨텍스트에서 정답 구간 추출 |
 
-`SOP_GPT`와 동일한 Transformer 본체를 사용하지만 `head` 대신 `qa_head`를 달아 **스팬 추출** 태스크를 수행.
+### Qwen3-1.7B — BF16 vs Q4_K_M
 
-```
-(SOP_GPT 본체 동일)
-qa_head : Linear(768 → 2)   # 토큰별 (start_logit, end_logit) 출력
-```
+두 추론 엔진을 모두 지원한다. 용도에 따라 선택할 수 있도록 UI에서 별도 엔드포인트로 분리해뒀다.
 
-`"질문: {질문}\n참고: {컨텍스트}"` 형식의 입력에서 정답의 시작/끝 토큰 위치를 분류한다. 자기회귀 생성이 아니라 분류 태스크이므로 오류 누적 없이 작은 모델로도 정확한 위치를 찾을 수 있다.
-
-### 체크포인트와 역할
-
-| 파일 | 클래스 | 학습 단계 | 역할 |
+| 엔진 | 백엔드 | 메모리 | 특징 |
 |---|---|---|---|
-| `SOP_GPT.pt` | `SOP_GPT` | Stage 1 이어쓰기 | `/generate` 자유 텍스트 생성 |
-| `SOP_GPT_qa.pt` | `SOP_GPT` | Stage 2 Q&A 파인튜닝 | RAG 점수 미달 시 직접 답변 생성 |
-| `SOP_GPT_span.pt` | `SOP_GPT_Span` | Stage 4 스팬 학습 | RAG 점수 초과 시 컨텍스트에서 정답 위치 추출 |
+| BF16 | Transformers + MPS | MPS 3.3 GB | 정확도 우세, 로딩 빠름 |
+| Q4_K_M | llama-cpp + Metal | RSS 1.4 GB | 속도 우세, 메모리 절감 |
 
-## RAG 아키텍처
+**Q4_K_M 설정**: context 추출 요청(`ask_with_context`)은 항상 `/no_think`, 30자 이상 물음표 포함 질문은 `/think` 자동 활성화. thinking 완료 후 빈 답변이면 `/no_think` 폴백. temperature 0.7 / top_p 0.9 명시.
+
+KorQuAD 100문항 기준 벤치마크: BF16 **82%** / 2.68s · Q4_K_M **80%** / 0.81s — [상세 결과 →](basicdata/eval.md#qwen3-17b-bf16-vs-q4_k_m-벤치마크)
+
+---
+
+## RAG 파이프라인
+
+**지식 베이스**: KorQuAD v1.0 train+dev (~61K 문단) + `ragdata/` 도메인 문서 → ~180자 단위 청크 (~36K개) 인덱싱
+
+**ragdata 구성 (RPG·게임 특화)**:
+- `rpg/` — JRPG · ARPG · MMORPG · TRPG · 한국 RPG 역사 · RPG 공통 시스템
+- `gamejob/` — 게임 직군 · 개발 프로세스 용어 · BM/KPI(F2P, DAU, ARPU 등)
+
+### STEP 2 — TF-IDF 검색
 
 ![STEP 2 – Custom RAG Chatbot](images/rag.png)
 
-1. **지식 베이스**: KorQuAD v1.0 train+dev set 문단 + `ragdata/` 폴더 문서를 ~180자 단위 청크로 분할해 인덱싱
-2. **검색(Retrieve)**: `source/rag/rag.py` — scikit-learn `TfidfVectorizer` + 코사인 유사도
-3. **라우팅**: 코사인 유사도 점수 ≥ `0.25`이면 Stage 4(추출형 QA), 미만이면 Stage 2(잡담형)로 폴백
-4. **추출(Extract)**: `SOP_GPT_Span`이 `"질문: {질문}\n참고: {청크}"` 안에서 정답의 시작/끝 토큰 위치를 직접 분류해 그 구간을 잘라 답으로 사용 (검증셋 기준 정확히 일치 31.5%, 포함/겹침 72.8%)
+`TfidfVectorizer` + 코사인 유사도. score ≥ 0.25 → `SOP_GPT_Span` 스팬 추출, 미달 → `SOP_GPT_qa` 폴백.
 
-## LangChain RAG 아키텍처
+**TF-IDF를 선택한 이유**: 외부 임베딩 모델 없이 `sklearn` 하나로 RAG 전체 흐름(문서 인덱싱 → 유사도 검색 → 스팬 추출 → 폴백)을 직접 구현하는 게 목적이었다. 구현이 단순하고 추가 의존성이 없어 RAG의 핵심 개념을 익히는 첫 단계로 적합했다. 단, 키워드가 정확히 일치하지 않으면 유사한 문서를 찾지 못하는 한계가 있어 STEP 3으로 발전시켰다.
+
+### STEP 3 — BM25+FAISS 하이브리드 (LangChain)
 
 ![LangChain Hybrid RAG Chatbot 구조](images/langchain.png)
 
-RAG 모드와 동일한 라우팅·추출 구조를 재사용하되, 검색기를 **BM25+FAISS 하이브리드**로 교체한 모드.
+- **BM25** (sparse): 키워드 매칭, 소문자 정규화로 영어 약어(`jrpg` 등) 대응
+- **FAISS** (dense, `jhgan/ko-sroberta-multitask`): 의미 기반 검색
+- `calibrate()`로 두 점수를 고정 범위 정규화 후 `0.5·sparse + 0.5·dense` 합산
+- score ≥ 0.515 → 스팬 추출, 미달 → QA 폴백 (분류 정확도 73.3% → 82.7%)
 
-1. **지식 베이스**: RAG 모드와 동일한 KorQuAD + `ragdata/` 청크 (~36K개)
-2. **검색(Retrieve)**: `source/lc/retriever.py` — BM25(sparse) + FAISS(dense) 하이브리드
-   - **BM25**: 단어 빈도 기반, 질문 키워드가 문서에 그대로 있을 때 강함
-   - **FAISS** (`jhgan/ko-sroberta-multitask`): 문장 임베딩 기반, 단어가 달라도 의미가 같으면 검색됨 (`normalize_embeddings=True`로 L2 정규화 일관성 보장)
-   - BM25 `preprocess_func=lambda t: t.lower().split()`으로 대소문자 정규화 (영어 약어 매칭 개선)
-   - 두 점수를 `calibrate()`로 정규화 후 `α·sparse + (1-α)·dense` 합산 (α=0.5)
-   - calibration: KorQuAD 40개 + ragdata 도메인 40개 (50:50 균형 샘플링)
-3. **라우팅**: hybrid score ≥ `0.515`이면 Stage 4(추출형 QA), 미만이면 Stage 2(잡담형)로 폴백
-   - TF-IDF 단독 73.3% → 하이브리드+고정보정 82.7% (held-out 검증 기준)
-4. **추출(Extract)**: RAG 모드와 동일한 `SOP_GPT_Span` 스팬 추출
+**하이브리드를 선택한 이유**: TF-IDF(키워드 일치)와 임베딩(의미 유사도)은 서로 다른 종류의 질문에서 강점이 갈린다. "JRPG가 뭐야"처럼 고유명사가 포함된 질문은 sparse가 유리하고, "전투가 턴 방식인 RPG"처럼 키워드 없이 의미로 묻는 질문은 dense가 유리하다. 두 점수를 `calibrate()`로 정규화한 뒤 앙상블하면 어느 한쪽이 실패해도 다른 쪽이 보완할 수 있어 단독 검색기 대비 안정적인 정확도를 얻을 수 있다.
 
-## LangGraph 아키텍처
+```
+LCEL 체인
+ ├─ basic_chain     : PromptTemplate | SOP_GPT_LLM | StrOutputParser
+ ├─ tfidf_rag_chain : TfidfRetriever(≥0.25) → SpanExtractor / SOP_GPT_LLM
+ └─ lc_rag_chain    : HybridRetriever(≥0.515) → SpanExtractor / SOP_GPT_LLM
+```
+
+### STEP 4 — LangGraph (retry 루프)
 
 ![STEP 4 – LangGraph 기반 Chatbot](images/langgraph.png)
 
-LangChain 체인의 조건 분기를 **명시적 그래프(StateGraph)**로 표현한 모드. 검색 실패 시 임계값을 낮춰가며 자동 재시도하는 루프를 내장한다.
-
-0. **init**: user 메시지를 `messages`에 1회 추가 (retry 루프 중 중복 방지)
-1. **retrieve**: `HybridRetriever.best_match()` 호출 → `score`, `documents` 갱신
-2. **grade**: `score ≥ threshold[retry_count]` 판단
-   - 충족 → `generate_span` (RAG 경로)
-   - 미달 + 재시도 남음 → `increment_retry` → 다시 `retrieve` (threshold 단계적 완화)
-   - 미달 + 재시도 소진 → `generate_direct` (직접 생성 경로)
-3. **generate_span**: `SOP_GPT_Span`으로 스팬 추출 후 `_expand_span()`으로 문장 단위 확장 → `text` SSE 이벤트
-4. **generate_direct**: `SOP_GPT_QA` 직접 생성 → `text_fallback` SSE 이벤트 (새 말풍선)
-
-**임계값 분리** (SOP 모델과 Claude가 다른 기준 적용):
-- SOP 모델: `[0.35, 0.25, 0.2]` — RAG 없이 단독 답변 품질이 낮아 더 자주 RAG 경로 진입
-- Claude: `[0.515, 0.4, 0.3]` — 자체 생성 능력이 있어 문서 품질이 높을 때만 RAG 사용
-
-**메모리 시스템**: `MemorySaver`(단기, 서버 내 AI 컨텍스트) + JSON 파일(장기, 재시작 후 히스토리 표시). `thread_id = {userId}_{mode}` 형식으로 모드·사용자별 독립 관리.
-
-Claude 버전(`build_claude_graph`)은 동일한 그래프 구조에서 generate 노드만 Claude API 호출로 교체.
-
-## LangChain 파이프라인 구조
+LangChain 체인의 조건 분기를 명시적 그래프로 표현. 검색 실패 시 임계값을 낮춰가며 자동 재시도.
 
 ```
-질문 (str)
- ├─ basic_chain     : PromptTemplate | SOP_GPT_LLM | StrOutputParser
- ├─ tfidf_rag_chain : TfidfRetriever → 유사도 라우팅(≥0.25) → SpanExtractor / SOP_GPT_LLM
- └─ lc_rag_chain    : HybridRetriever(BM25+FAISS) → 유사도 라우팅(≥0.515) → SpanExtractor / SOP_GPT_LLM
+init → retrieve → grade → generate_span    (RAG 성공)
+                        → increment_retry → retrieve  (임계값 완화, 최대 2회)
+                        → generate_direct             (재시도 소진)
 ```
 
-```
-LangGraph 파이프라인 (GraphState)
- retrieve → grade → generate_span   (RAG 성공)
-                  → increment_retry → retrieve (재시도, 최대 2회)
-                  → generate_direct (재시도 소진)
-```
+| 모델 | retry 임계값 `[t0, t1, t2]` | 비고 |
+|---|---|---|
+| SOP_GPT | `[0.35, 0.25, 0.2]` | RAG 의존도 높아 낮게 설정 |
+| Claude / Qwen3 | `[0.515, 0.375, 0.350]` | 자체 생성 능력 있어 높게 설정 (empirical 검증) |
 
-- `source/lc/llm.py`: `SOP_GPT`를 LangChain `LLM`으로 래핑 (`SOP_GPT_LLM`), `SOP_GPT_Span`을 `RunnableLambda` 주입용 함수로 반환 (`make_span_extractor`)
-- `source/lc/chain.py`: `build_rag_chain(retriever, llm, span_extractor_fn, threshold)` — 검색기와 임계값만 달리해 `tfidf_rag_chain`과 `lc_rag_chain` 두 체인을 동일 함수로 조립
-- `source/lc/retriever.py`: LangChain `BM25Retriever` + `FAISS` + `EnsembleRetriever` 기반 `HybridRetriever`
-- `source/lg/graph.py`: `build_graph()` / `build_claude_graph()` / `build_claude_agent_graph()` — StateGraph 조립
+**메모리**: `MemorySaver`(단기) + JSON 파일(장기). `thread_id = {userId}_{mode}` 형식.
+
+엔진별 그래프: `build_graph(SOP_GPT)` · `build_claude_graph` · `build_qwen_graph` · `build_claude_agent_graph`
+
+---
 
 ## 디렉토리 구조
 
 ```
 chatbot/
-├── README.md
-├── version.md
-├── images/                     # 아키텍처 다이어그램 이미지
-│   ├── train.png               # 학습 파이프라인 흐름도
-│   ├── basic.png               # STEP 1 Basic GPT 흐름도
-│   ├── rag.png                 # STEP 2 Custom RAG 흐름도
-│   ├── langchain.png           # STEP 3 LangChain Hybrid RAG 구조도
-│   └── langgraph.png           # STEP 4 LangGraph 파이프라인 구조도
-├── .env                        # 비밀 아닌 설정 (tracing on/off, endpoint, project명) — gitignore
-├── api_keys                    # API 키 보관 — gitignore
-├── basicdata/                  # 참고 자료, 작업 계획, 세션 기록, 코드 설명서(info.md)
-├── ragdata/                    # RAG 검색 인덱스에 추가할 커스텀 문서 (.txt/.md)
-│   ├── rpg.md                  # RPG 장르 통합 설명
-│   ├── rpg_jrpg.md             # JRPG 장르 상세
-│   ├── rpg_mmorpg.md           # MMORPG 장르 상세
-│   ├── rpg_mechanics.md        # RPG 공통 시스템 (레벨/스킬/아이템)
-│   ├── rpg_trpg.md             # TRPG·D&D 규칙
-│   ├── rpg_arpg.md             # ARPG 장르 상세
-│   ├── rpg_korean_games.md     # 한국 RPG 역사
-│   ├── ai_machine_learning.md  # AI·머신러닝 설명
-│   └── korean_food.md          # 한국 음식 설명
+├── ragdata/                    # RAG 지식 베이스 (파일 추가만으로 인덱스 자동 확장)
+│   ├── rpg/                    # RPG 장르별 문서 (JRPG·ARPG·MMORPG·TRPG·한국 RPG)
+│   └── gamejob/                # 게임 직군·개발 용어·비즈니스 용어
+├── basicdata/                  # 프로젝트 문서 (info.md, eval.md, plan.md)
+├── scripts/                    # 유틸리티 스크립트 (캘리브레이션, 임계값 검증 등)
 └── source/
-    ├── app/
-    │   ├── app.py              # FastAPI 선언 + 라우터 등록 (진입점)
-    │   ├── state.py            # 모델·체인·검색기 초기화 (import 시점 1회 실행)
-    │   ├── auth.py             # ID+PWD 로그인/사용자 생성 (data/users.json)
-    │   ├── models.py           # Pydantic 스키마 (AuthRequest/AuthResponse 포함)
-    │   ├── streaming.py        # SSE 헬퍼 (auto_sop_stream, auto_claude_stream 포함)
-    │   ├── ui.py               # GET / 웹 UI (로그인 화면 + 자동 라우팅 채팅)
-    │   └── routers/
-    │       ├── chat.py         # non-streaming 엔드포인트 + /auth/login
-    │       └── stream.py       # SSE 스트리밍 엔드포인트 (/chat/auto/stream 포함)
-    ├── lc/                     # LangChain 통합 레이어
-    │   ├── retriever.py        # HybridRetriever (BM25 + FAISS, normalize_embeddings=True)
-    │   ├── llm.py              # SOP_GPT_LLM (LangChain LLM 래퍼 + 스트리밍)
-    │   ├── chain.py            # LCEL 파이프라인 조립 + _expand_span 답변 확장
-    │   ├── claude_llm.py       # Claude API 연동 (답변 생성 + SSE 스트리밍 + Agent 도구)
-    │   └── router.py           # Claude Haiku 기반 질문 분류기 (자동 라우팅)
-    ├── lg/                     # LangGraph 파이프라인 레이어
+    ├── app/                    # FastAPI 서빙 레이어
+    │   ├── app.py              # 진입점 + 라우터 등록
+    │   ├── state.py            # 모델·체인·검색기 초기화 (서버 기동 시 1회)
+    │   ├── auth.py             # ID+PWD 로그인/사용자 생성
+    │   ├── streaming.py        # SSE 헬퍼 (자동 라우팅 포함)
+    │   ├── ui.py               # 웹 UI (로그인 → 분할화면 채팅)
+    │   └── routers/            # chat.py (non-streaming) · stream.py (SSE)
+    ├── llm/                    # LLM 래퍼
+    │   ├── sop_llm.py          # SOP_GPT → LangChain LLM 래퍼
+    │   ├── claude_llm.py       # Claude API (답변·스트리밍·Agent 도구)
+    │   └── qwen_llm.py         # Qwen3-1.7B (QwenTransformers BF16 + QwenGGUF Q4_K_M)
+    ├── lc/                     # LangChain 통합
+    │   ├── retriever.py        # HybridRetriever (BM25 + FAISS)
+    │   ├── chain.py            # LCEL 체인 조립
+    │   └── router.py           # 질문 자동 분류기 (Claude Haiku)
+    ├── lg/                     # LangGraph 파이프라인
     │   ├── models.py           # GraphState / AgentState TypedDict
-    │   ├── nodes.py            # 노드 팩토리 8개 (SOP_GPT 4개 + Claude 4개)
-    │   └── graph.py            # StateGraph 조립 (build_graph, build_claude_graph, build_claude_agent_graph)
-    ├── rag/
-    │   └── rag.py              # KorQuAD 유틸리티 + TF-IDF 검색기
+    │   ├── nodes.py            # 노드 팩토리 10개 (SOP_GPT 4 + Claude 4 + Qwen 2)
+    │   └── graph.py            # StateGraph 조립
+    ├── rag/rag.py              # KorQuAD 유틸리티 + TF-IDF 검색기
     └── model/
-        ├── bpe.py              # BPE 토크나이저 직접 구현 (+ tokenize_with_offsets)
-        ├── tokenizer.py        # 코퍼스 로딩 (kowikitext, 챗봇 Q&A)
-        ├── model.py            # GPT 아키텍처 (SOP_GPT, SOP_GPT_Span)
-        ├── train_utils.py      # 공통 학습 루프 (early stopping, gradient accumulation)
-        ├── chat.py             # 추론 함수 (chat, chat_qa, extract_answer)
-        ├── main.py             # 진입점 (train / train_qa / train_span / chat*)
-        ├── bpe_vocab.json
-        ├── SOP_GPT.pt          # Stage 1 체크포인트 (이어쓰기, val loss 3.355)
-        ├── SOP_GPT_qa.pt       # Stage 2 체크포인트 (Q&A, val loss 2.657)
-        └── SOP_GPT_span.pt     # Stage 4 체크포인트 (추출형 RAG QA, val loss 3.092)
+        ├── sop_model/          # SOP_GPT 학습·추론 패키지
+        │   ├── bpe.py          # BPE 토크나이저 직접 구현
+        │   ├── tokenizer.py    # 코퍼스 로딩 (kowikitext, 챗봇 Q&A, AI Hub)
+        │   ├── model.py        # GPT 아키텍처 (SOP_GPT, SOP_GPT_Span)
+        │   ├── train_utils.py  # 공통 학습 루프 (early stopping, bf16 autocast)
+        │   ├── chat.py         # 추론 함수 (chat_qa, extract_answer)
+        │   ├── dpo.py          # DPO 학습 모듈 (Stage 5)
+        │   ├── main.py         # 진입점 (train / chat 모드)
+        │   ├── SOP_GPT.pt      # Stage 1 체크포인트
+        │   ├── SOP_GPT_qa.pt   # Stage 2 체크포인트
+        │   └── SOP_GPT_span.pt # Stage 4 체크포인트
+        └── qwen/               # Qwen3-1.7B 모델 파일 (BF16 + Q4_K_M GGUF)
 ```
+
+---
 
 ## 환경 설정
 
-API 키와 LangSmith 설정은 프로젝트 루트의 두 파일에 보관합니다 (모두 gitignore 처리).
-
 ```
-# .env — 비밀 아닌 설정
+# .env
 LANGSMITH_TRACING=true
 LANGCHAIN_TRACING_V2=true
 LANGSMITH_ENDPOINT=https://apac.api.smith.langchain.com
 LANGSMITH_PROJECT=adapterz-langchain-textbook
 
-# api_keys — 실제 키 값
+# api_keys
 LANGSMITH_API_KEY=...
-ANTHROPIC_API_KEY=...   # Claude API 사용 시 필요
+ANTHROPIC_API_KEY=...
 ```
 
 ## 실행
 
 ```bash
-# 의존성 설치
-pip install fastapi uvicorn torch langchain langchain-community langchain-huggingface \
-            langchain-core faiss-cpu rank_bm25 sentence-transformers scikit-learn python-dotenv \
-            anthropic langgraph==0.2.70
+uv sync                          # 의존성 설치
+```
 
-# 스모크 테스트 (source/ 디렉토리에서)
-cd source
-python test.py               # 전체 테스트 (HybridRetriever 포함, 1~2분 소요)
-python test.py --skip-hybrid # 빠른 테스트 (임베딩 모델 건너뜀)
+### Qwen3-1.7B 모델 파일 준비
 
-# 웹 서버 (source/app/ 디렉토리에서)
-# 실행전에 학습하여 .pt파일 만들기 필요
-cd source/app
+모델 파일은 용량 문제로 GitHub에 포함되지 않습니다. 아래 두 가지 중 하나를 `source/model/qwen/`에 준비하세요.
+
+**BF16 (QwenTransformers, 약 3.4GB)**
+```bash
+# HuggingFace CLI
+pip install huggingface_hub
+huggingface-cli download Qwen/Qwen3-1.7B --local-dir source/model/qwen/Qwen3-1.7B
+```
+
+**Q4_K_M GGUF (QwenGGUF, 약 1.1GB) — 권장**
+```bash
+# HuggingFace에서 직접 다운로드
+huggingface-cli download Qwen/Qwen3-1.7B-GGUF \
+  Qwen3-1.7B-Q4_K_M.gguf \
+  --local-dir source/model/qwen/
+```
+
+또는 [Qwen3-1.7B-GGUF](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF) 페이지에서 `Qwen3-1.7B-Q4_K_M.gguf`를 수동으로 받아 `source/model/qwen/`에 두면 됩니다.
+
+```bash
+# 웹 서버 (source/app/ 에서)
 uvicorn app:app --reload
 
-# 모델 학습/대화 (source/model/ 디렉토리에서)
-cd source/model
-
-# 개별 실행
-python main.py train         # Stage 1 학습
-python main.py train_qa      # Stage 2 파인튜닝
-python main.py train_span    # Stage 4 추출형 RAG QA 학습
-python main.py train_dpo     # Stage 5 DPO 선호 학습 (진행 중)
-python main.py chat          # Stage 1 이어쓰기 REPL
-python main.py chat_qa       # Stage 2 Q&A REPL
-python main.py chat_span     # Stage 4 RAG QA REPL
+# 모델 학습 (source/model/sop_model/ 에서)
+python main.py train             # Stage 1
+python main.py train_qa          # Stage 2
+python main.py train_span        # Stage 4
+python main.py train_dpo         # Stage 5 (진행 중)
 ```
 
 ## API
 
-**인증**
-- `POST /auth/login` — `{"user_id": str, "password": str}` → `{"ok": bool, "msg": str}` — 로그인 또는 신규 계정 자동 생성
+| 엔드포인트 | 설명 |
+|---|---|
+| `POST /auth/login` | 로그인 / 신규 계정 자동 생성 |
+| `POST /chat/auto/stream` | **자동 라우팅** SOP_GPT 스트리밍 (추천) |
+| `POST /chat/claude/auto/stream` | **자동 라우팅** Claude 스트리밍 (추천) |
+| `POST /chat/{basic\|rag\|langchain\|langgraph}` | SOP_GPT 각 모드 |
+| `POST /chat/claude/{basic\|rag\|langchain\|langgraph}` | Claude 각 모드 |
+| `POST /chat/qwen/langgraph/stream` | Qwen3 BF16 LangGraph |
+| `POST /chat/qwen-q/langgraph/stream` | Qwen3 Q4_K_M LangGraph |
+| `GET /` | 웹 UI |
+| `GET /docs` | Swagger UI |
 
-**자동 라우팅 (추천)**
-- `POST /chat/auto/stream` — 질문 자동 분류 → 적합한 SOP_GPT 체인 스트리밍
-- `POST /chat/claude/auto/stream` — 질문 자동 분류 → 적합한 Claude 체인 스트리밍
+SSE 이벤트 타입: `mode` · `text` · `text_fallback` · `rag_context` · `status` · `done`
 
-이벤트 타입 (SSE): `mode` (선택된 체인) | `text` | `text_fallback` | `rag_context` | `status` | `done`
-
-**SOP_GPT 엔드포인트**
-- `POST /generate` — `{"prompt": str}` → `{"text": str}` — Stage 1 이어쓰기
-- `POST /chat/basic` — `{"question": str}` → `{"answer", "retrieved_context", "used_rag"}` — 검색 없이 QA 모델 직접 응답
-- `POST /chat/rag` — TF-IDF 검색 + 유사도 라우팅
-- `POST /chat/langchain` — BM25+FAISS 검색 + 유사도 라우팅
-- `POST /chat/langgraph` — BM25+FAISS 검색 + retry 루프 + SOP_GPT 답변 (LangGraph 파이프라인)
-
-**Claude 엔드포인트**
-- `POST /chat/claude/basic` — 검색 없이 Claude 직접 응답
-- `POST /chat/claude/rag` — TF-IDF 검색 + Claude 답변
-- `POST /chat/claude/langchain` — BM25+FAISS 검색 + Claude 답변
-- `POST /chat/claude/langgraph` — BM25+FAISS 검색 + retry 루프 + Claude 답변 (LangGraph 파이프라인)
-
-**SSE 스트리밍 엔드포인트** (text/event-stream)
-- `POST /chat/{basic|rag|langchain}/stream` — SOP_GPT 스트리밍
-- `POST /chat/langgraph/stream` — LangGraph 노드별 상태 이벤트
-- `POST /chat/claude/{basic|rag|langchain}/stream` — Claude 스트리밍
-- `POST /chat/claude/langgraph/stream` — Claude LangGraph 스트리밍
-
-**UI / Docs**
-- `GET /` — 로그인 화면 → 자동 라우팅 분할화면 웹 채팅 UI (좌: SOP_GPT, 우: Claude)
-- `GET /docs` — Swagger UI
-
-자세한 개발 과정은 [basicdata/plan.md](basicdata/plan.md), 단계별 변경 이력은 [version.md](version.md), 체인 평가 결과는 [basicdata/eval.md](basicdata/eval.md) 참고.
+---
 
 ## 데이터 출처
 
-본 프로젝트의 Stage 1 학습에 AI Hub에서 제공하는 아래 데이터셋을 활용했습니다.
+본 프로젝트의 Stage 1 학습에 **한국지능정보사회진흥원(NIA)** AI Hub 데이터셋을 활용했습니다. AI Hub 이용약관에 따라 인공지능 학습 목적으로만 사용합니다.
 
-- 011. 일상대화 한국어 멀티세션 데이터
-- 020. 주제별 텍스트 일상 대화 데이터
-- 141. 한국어 멀티세션 대화
-- 297. SNS 데이터 고도화
+- 일상대화 한국어 멀티세션 데이터
+- 주제별 텍스트 일상 대화 데이터
+- 한국어 멀티세션 대화
+- SNS 데이터 고도화
 
-본 AI 데이터는 **한국지능정보사회진흥원(NIA)**의 사업 결과물이며, AI Hub 이용약관에 따라 인공지능 학습 모델의 학습 목적으로만 사용합니다.
+자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md)

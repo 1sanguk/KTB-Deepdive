@@ -6,7 +6,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
-from langchain.retrievers import EnsembleRetriever
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -17,7 +17,7 @@ from sentence_transformers import CrossEncoder
 warnings.filterwarnings("ignore", message="Relevance scores must be between")
 
 SOURCE_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SOURCE_DIR / "model"))  # tokenizer.py용
+sys.path.insert(0, str(SOURCE_DIR / "model" / "sop_model"))  # tokenizer.py용
 sys.path.insert(0, str(SOURCE_DIR))             # rag 패키지용
 
 from rag import load_korquad_qa_pairs, chunk_context, load_ragdata_passages  # noqa: E402
@@ -181,7 +181,7 @@ class HybridRetriever:
         return self.passages[best_idx], float(scores[best_idx])
 
 
-def build_hybrid_retriever(root_dir: str | None = None, ragdata_dir: str | None = None, alpha: float = 0.5) -> HybridRetriever:
+def build_hybrid_retriever(root_dir: str | None = None, ragdata_dir: str | None = None, alpha: float = 0.3) -> HybridRetriever:
     if PASSAGES_CACHE.exists():
         print("[hybrid] passages 캐시 로드 중...")
         passages = pickle.loads(PASSAGES_CACHE.read_bytes())

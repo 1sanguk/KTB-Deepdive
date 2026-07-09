@@ -10,7 +10,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import Runnable, RunnableLambda, RunnablePassthrough
 
-from lc.llm import SOP_GPT_LLM
+from llm.sop_llm import SOP_GPT_LLM
 from lc.retriever import HybridRetriever
 
 QA_PROMPT = PromptTemplate.from_template("질문: {question}\n답변: ")

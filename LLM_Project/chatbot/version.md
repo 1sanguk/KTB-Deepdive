@@ -2,7 +2,9 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
-- [2026-07-07 — 히스토리 누적 버그 수정 + 최소 생성 길이 보장](#2026-07-07--히스토리-누적-버그-수정--최소-생성-길이-보장)
+- [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화)
+- [2026-07-08 — Qwen3-1.7B 도입 + llm/ 디렉토리 재구성 + retry 임계값 검증](#2026-07-08--qwen3-17b-도입--llm-디렉토리-재구성--retry-임계값-검증)
+- [2026-07-07 — 히스토리 누적 버그 수정 + 최소 생성 길이 보장 + uv 패키지 관리 세팅](#2026-07-07--히스토리-누적-버그-수정--최소-생성-길이-보장--uv-패키지-관리-세팅)
 - [2026-07-06 — 자동 라우팅 + ID/PWD 로그인 시스템](#2026-07-06--자동-라우팅--idpwd-로그인-시스템)
 - [2026-07-04 — LangGraph 메모리 시스템 + 전 모드 히스토리 + UI 단기 캐시 + 임계값 분리](#2026-07-04--langgraph-메모리-시스템--전-모드-히스토리--ui-단기-캐시--임계값-분리)
 - [2026-07-03 — Claude Agent + Hybrid Retriever 수정 + RAG 답변 품질 개선](#2026-07-03--claude-agent--hybrid-retriever-수정--rag-답변-품질-개선)
@@ -15,6 +17,226 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화
+
+### DPO 학습 완료 (Stage 5)
+
+두 가지 방식으로 DPO 학습을 시도했다.
+
+**실험 1 — KorQuAD 기반 (실패)**
+- chosen: KorQuAD GT 정답 (짧은 명사구, 예: "헌법재판소")
+- rejected: SOP_GPT 오답 (단일 단어, 예: "법원")
+- 결과: 스타일 불일치로 오히려 품질 저하 (중국어 혼입, 반복 루프)
+- 원인: chosen/rejected의 길이·포맷 차이가 너무 커서 모델이 "선호"가 아닌 "길이 패턴"을 학습
+
+**실험 2 — 챗봇 데이터 기반 (부분 개선)**
+- `scripts/make_dpo_data.py` 신설: 챗봇 Q&A에서 모델 출력과 GT를 비교, 1,937쌍 자동 수집
+- chosen: 원본 챗봇 GT, rejected: 모델 생성 출력 (동일한 대화 스타일, 내용만 다름)
+- `source/model/sop_model/dpo.py` 수정: circular shift 방식 → 사전 생성 triple 방식
+- `source/model/sop_model/main.py` 수정: `dpo_data.json` 로드, early stopping (patience=5)
+- 결과: val loss 0.0250 수렴, 실제 파이프라인 개선 효과는 제한적
+
+**근본 한계**: DPO는 모델이 이미 합리적인 출력을 낼 수 있어야 작동한다. SOP_GPT(91M)는 KorQuAD 질문에 대해 완전히 다른 단어를 생성하는 단계라 "선호 응답"을 학습시키기 어렵다. 실제 서비스에서는 Span 모델이 답변 추출을 담당하므로 DPO 효과가 파이프라인에 미치는 영향도 제한적이다.
+
+---
+
+### PBKDF2 패스워드 해싱 (`source/app/auth.py`)
+
+평문 패스워드 저장 방식(`{id: "password"}`)을 PBKDF2-HMAC-SHA256으로 교체했다.
+
+| 항목 | 값 |
+|---|---|
+| 알고리즘 | PBKDF2-HMAC-SHA256 |
+| 반복 횟수 | 600,000회 (NIST SP 800-132 권고 기준) |
+| Salt | 사용자별 16바이트 랜덤 (`os.urandom(16)`) |
+| 저장 형식 | `{"salt": "<hex>", "hash": "<hex>"}` |
+
+**보안 원칙**: 반복 횟수·알고리즘이 GitHub에 공개되어도 안전 — 비밀번호를 모르면 무차별 대입만 가능하고 600K 반복이 그 속도를 크게 낮춘다. Salt는 사용자마다 달라 레인보우 테이블 공격을 차단한다.
+
+---
+
+### Q4_K_M 자동 Think/No_Think + 파라미터 최적화 (`source/llm/qwen_llm.py`)
+
+Q4_K_M 모드에서 느린 응답 속도(3.62s/q)와 과도한 출력 길이(55.3단어)를 해결했다.
+
+**수정 내용:**
+- `_needs_thinking(question)`: 질문 길이 ≥30자 + `?` 포함 → `/think` (CoT 활성화), 그 외 → `/no_think`
+- `MAX_TOKENS_THINK = 1024`: thinking 모드는 CoT 토큰도 포함되므로 별도 예산 확보
+- temperature=0.7, top_p=0.9 명시 (이전에는 기본값 사용 → 출력 제어 불가)
+- `_strip_think` 개선: `</think>` 없이 잘린 블록도 제거 (`re.sub(r"<think>.*", "", text, flags=re.DOTALL)`)
+- 빈 답변 폴백: thinking이 토큰을 전부 소모해 빈 출력 시 `think=False`로 재시도
+- thinking 모드 시스템 프롬프트: 한국어 + 영어 병기 (한국어만 지정 시 중국어 출력 발생)
+
+**100문항 KorQuAD 벤치마크 결과:**
+
+| 항목 | Q4 구버전 | Q4 신버전 | BF16 |
+|---|---|---|---|
+| 정확도 | 77.0% | 80.0% | 82.0% |
+| 평균 응답(s) | 3.62 | **0.81** | 2.68 |
+| 총 소요(s) | 361.5 | **80.9** | 267.9 |
+| 평균 응답길이(단어) | 55.3 | 12.0 | 12.3 |
+
+Q4 신버전이 BF16보다 3.3배 빠르고 정확도 2%p 차이. think/no_think 분포: 전체 100문항 중 64개 THINK, 36개 NO_THINK 자동 선택.
+
+---
+
+## 2026-07-08 — Qwen3-1.7B 도입 + llm/ 디렉토리 재구성 + retry 임계값 검증
+
+### Qwen3-1.7B 로컬 LLM 통합
+
+Alibaba의 오픈소스 Qwen3-1.7B 모델을 두 가지 모드로 통합해 Claude/SOP_GPT와 나란히 비교할 수 있는 새 패널을 추가했다.
+
+| 모드 | 클래스 | 포맷 | 실행 방식 |
+|---|---|---|---|
+| BF16 (정밀도 유지) | `QwenTransformers` | HuggingFace safetensors | PyTorch + MPS |
+| Q4_K_M (4비트 양자화) | `QwenGGUF` | GGUF | llama-cpp-python |
+
+**`source/llm/qwen_llm.py`** (신설):
+- `QwenBase`: 공통 인터페이스 (`ask(question)`, `ask_with_context(question, context)`)
+- `QwenGGUF`: llama-cpp로 GGUF 모델 로드. `_strip_think()`으로 `<think>…</think>` CoT 블록 제거
+- `QwenTransformers`: HuggingFace transformers + MPS 추론
+
+**모델 파일 위치 (`source/model/qwen/`)**:
+- `Qwen3-1.7B/` — HuggingFace safetensors (BF16, QwenTransformers용)
+- `Qwen3-1.7B-BF16.gguf` — BF16 GGUF (참고용)
+- `Qwen3-1.7B-Q4_K_M.gguf` — Q4_K_M 양자화 GGUF (QwenGGUF용)
+
+**신규 LangGraph 엔드포인트:**
+| 엔드포인트 | 모드 |
+|---|---|
+| `POST /chat/qwen/langgraph/stream` | Qwen3 BF16 LangGraph 스트리밍 |
+| `POST /chat/qwen-q/langgraph/stream` | Qwen3 Q4_K_M LangGraph 스트리밍 |
+
+**`lg/nodes.py`**: Qwen 노드 팩토리 2개 추가
+- `make_generate_qwen_context_node(qwen_llm)`: RAG 경로 — 검색 문서를 컨텍스트로 Qwen 호출
+- `make_generate_qwen_direct_node(qwen_llm)`: 직접 답변 경로 — 문서 없이 Qwen 호출
+
+**`lg/graph.py`**: `build_qwen_graph(retriever, qwen_llm, threshold)` 추가 — Claude 그래프와 동일한 구조, generate 노드만 Qwen으로 교체.
+
+---
+
+### Q4 응답 잘림 버그 수정 (`source/llm/qwen_llm.py`)
+
+Q4_K_M 모드에서 BF16보다 답변이 중간에서 잘리는 문제.
+
+**원인**: llama-cpp GGUF 토크나이저는 한국어를 HuggingFace transformers보다 더 많은 토큰으로 인코딩한다. `MAX_TOKENS=256`이 동일해도 llama-cpp 쪽에서 먼저 토큰 한도에 도달해 답변이 잘린다 (예: "RPG가 뭐야?" 답변이 BF16보다 훨씬 짧게 종료됨).
+
+**수정**: `MAX_TOKENS: 256 → 512`
+
+```python
+MAX_TOKENS   = 512   # 256에서 증가 — llama-cpp 한국어 토크나이저 비효율 보정
+CONTEXT_SIZE = 2048
+```
+
+---
+
+### 서버 로딩 카운터 수정 (`source/app/state.py`)
+
+**버그**: `now_count += 1`이 "로딩 중..." 출력 이전에 실행되어 카운터가 1부터 시작됨. 완료 시점에는 이미 최댓값이어서 "완료" 줄의 카운터도 부정확했음.
+
+**수정**: `now_count += 1`을 각 작업 완료 후, "완료" 출력 직전으로 이동.
+
+```python
+# 수정 전: 작업 시작 전 카운트 — (1/9) 로딩 중... 처럼 1부터 시작
+now_count += 1
+print(f"({now_count}/{total_count}) {name} 로딩 중...")
+
+# 수정 후: 작업 완료 후 카운트 — (0/9) 로딩 중... → (1/9) 완료
+print(f"({now_count}/{total_count}) {name} 로딩 중...")
+now_count += 1
+print(f"({now_count}/{total_count}) {name} 완료")
+```
+
+---
+
+### EnsembleRetriever import 수정 (`source/lc/retriever.py`)
+
+langchain 1.3.11에서 `EnsembleRetriever`가 `langchain.retrievers`에서 `langchain_classic.retrievers`로 이동됨.
+
+```python
+# 수정 전 (ModuleNotFoundError: No module named 'langchain.retrievers')
+from langchain.retrievers import EnsembleRetriever
+
+# 수정 후
+from langchain_classic.retrievers import EnsembleRetriever
+```
+
+---
+
+### Claude 그래프 retry 임계값 검증 및 조정 (`source/app/state.py`)
+
+기존 임계값 `[0.515, 0.4, 0.3]`이 경험적으로 설정된 값임을 확인하고, calibration 방식을 확장해 empirical하게 검증했다.
+
+**방법 (`scripts/validate_retry_threshold.py` 신설)**: 200개 관련 질문(KorQuAD) + 200개 무관 질문(챗봇 데이터)의 hybrid 점수를 직접 계산하고, 각 retry 구간별 관련 질문 비율과 임계값별 F1을 측정.
+
+**검증 결과** (기존 임계값 기준):
+
+| 구간 | 임계값 | 관련 질문 비율 |
+|---|---|---|
+| 통과 `[0.515, ∞)` | t0=0.515 | 100% |
+| retry 1 `[0.4, 0.515)` | t1=0.4 | 58.3% |
+| retry 2 `[0.3, 0.4)` | t2=0.3 | 46.4% — irrelevant 다수 |
+| F1 최적 | — | threshold=0.325 |
+
+retry 2 구간이 irrelevant 과반이라 RAG 품질이 낮아지는 문제를 확인. F1 최적 구간(0.325~0.375)을 기준으로 임계값 상향.
+
+```python
+# 수정 전
+GRAPH_CLAUDE_THRESHOLD = [0.515, 0.4, 0.3]
+
+# 수정 후
+GRAPH_CLAUDE_THRESHOLD = [0.515, 0.375, 0.350]  # retry는 F1 최적 구간(0.325~0.375) 기준
+```
+
+---
+
+### llm/ 디렉토리 신설 + LLM 래퍼 이동
+
+Claude API, Qwen, SOP_GPT LLM 래퍼가 LangChain 전용 코드(`lc/`)에 섞여 있던 구조를 정리했다.
+
+**이동 내역:**
+| 이전 위치 | 새 위치 |
+|---|---|
+| `source/lc/llm.py` | `source/llm/sop_llm.py` |
+| `source/lc/claude_llm.py` | `source/llm/claude_llm.py` |
+| `source/lc/qwen_llm.py` (신규) | `source/llm/qwen_llm.py` |
+
+`lc/`에는 LangChain 전용 코드 3개(`chain.py`, `retriever.py`, `router.py`)와 `__init__.py`만 남는다.
+
+**import 수정 파일** (9개): `state.py`, `streaming.py`, `routers/stream.py`, `routers/chat.py`, `lc/chain.py`, `lg/nodes.py`, `lg/graph.py`, `evaluate.py`, `test.py`
+
+```python
+# 수정 전
+from lc.llm import SOP_GPT_LLM, make_span_extractor
+from lc.claude_llm import ask_claude, stream_claude, build_claude_rag_chain
+from lc.qwen_llm import QwenTransformers, QwenGGUF
+
+# 수정 후
+from llm.sop_llm import SOP_GPT_LLM, make_span_extractor
+from llm.claude_llm import ask_claude, stream_claude, build_claude_rag_chain
+from llm.qwen_llm import QwenTransformers, QwenGGUF
+```
+
+---
+
+## 2026-07-07 — 히스토리 누적 버그 수정 + 최소 생성 길이 보장 + uv 패키지 관리 세팅
+
+### uv 패키지 관리 도입
+
+기존에 conda 글로벌 환경에 패키지를 직접 설치하던 방식에서 uv 기반 프로젝트 관리로 전환.
+
+**추가된 파일:**
+- `pyproject.toml` — 프로젝트 의존성 선언 (requires-python ≥ 3.12, 18개 핵심 패키지)
+- `uv.lock` — 117개 패키지 버전 고정 lockfile
+
+**`.gitignore` 추가 항목:**
+- `.venv/` — uv가 생성하는 가상환경 폴더
+- `__pycache__/` — Python 캐시 폴더
+
+다른 환경에서 `uv sync` 한 줄로 동일한 환경 재현 가능.
 
 ---
 
