@@ -7,41 +7,64 @@
 
 ## 목차
 
-| 주차 | 주제 | 언어 | 링크 |
+| 주차 | 주제 | 예제 언어 | 링크 |
 |:----:|------|:----:|:----:|
-| Project | 한국어 Mini-GPT 챗봇 (자체 GPT + RAG + LangChain + LangGraph) | LLM | [바로가기](LLM_Project/chatbot/README.md) |
-| 08 | MCP Context Isolation (보안·권한·데이터 오염 문제 분석) | LLM | [바로가기](08/README.md) |
+| Project | RPG·게임 특화 한국어 Mini-GPT 챗봇 (자체 GPT + RAG + LangChain + LangGraph) | LLM & Python | [바로가기](LLM_Project/chatbot/README.md) |
+| 09 | GGUF Format (모델 파일 구조 & 실행 환경 최적화) | - | [바로가기](09/README.md) |
+| 08 | MCP Context Isolation (보안·권한·데이터 오염 문제 분석) | - | [바로가기](08/README.md) |
 | 06 | Hybrid Search (Sparse + Dense Vector 검색) | Python | [바로가기](06/README.md) |
 | 05 | 트랜스포머의 위치 인코딩 3가지 비교 | Python | [바로가기](05/README.md) |
 | 04 | 데이터 전처리 방식에 따른 머신러닝 모델 성능 변화 | Python | [바로가기](04/README.md) |
-| 03 | NumPy 배열의 생성과 연산 (브로드캐스팅 포함) | Python | [바로가기](03/README.md) |
+| 03 | NumPy 배열의 생성과 연산 (브로드캐스팅 포함) | - | [바로가기](03/README.md) |
 | 02 | 이터레이터와 제너레이터의 메모리 관리 효율성 | Python | [바로가기](02/README.md) |
 
 ---
 
 ## 주차별 요약
 
-### LLM_Project — 한국어 Mini-GPT 챗봇
+### LLM_Project — RPG·게임 특화 한국어 Mini-GPT 챗봇
 
-> 자모(NFD) 단위 BPE 토크나이저부터 GPT 아키텍처, 학습, RAG, LangChain 파이프라인, LangGraph, FastAPI 서빙, LangSmith 트레이싱까지 전부 직접 구현한 한국어 챗봇 프로젝트.
+> 자모(NFD) 단위 BPE 토크나이저부터 GPT 아키텍처, 학습, RAG, LangChain 파이프라인, LangGraph, Claude Agent, Qwen3-1.7B 로컬 LLM, FastAPI 서빙, LangSmith 트레이싱까지 전부 직접 구현한 한국어 챗봇 프로젝트.
 
 **핵심 결론**
 
-- 직접 구현한 GPT 디코더(~97M params, 12층)를 단계별로 학습: **Stage 1** 이어쓰기 → **Stage 2** Q&A 파인튜닝 → **Stage 4** 추출형 QA(정답 스팬 위치 분류) → **Stage 5** DPO 선호 학습(진행 중)
-- 검색 방식에 따라 **Basic / RAG(TF-IDF) / LangChain(BM25+FAISS 하이브리드) / LangGraph** 4가지 모드를 제공하고, 검색 점수가 임계값 미만이면 Stage 2(잡담형) 모델로, 이상이면 Stage 4(추출형) 모델로 라우팅
-- 하이브리드 검색(BM25+FAISS) 도입으로 라우팅 정확도가 TF-IDF 단독 73.3% → **82.7%**로 향상 (held-out 검증 기준)
-- **LangGraph**로 별도의 상태 기반(StateGraph) 파이프라인도 구현 — 검색 실패 시 단순 폴백이 아니라 **노드 재시도(retry) 루프**를 거치며, `build_graph`(SOP_GPT) / `build_claude_graph` / `build_claude_agent_graph`(Claude Agent 도구 호출) 3가지 그래프를 노드 팩토리 8개(SOP_GPT 4 + Claude 4)로 조립
-- LangChain LCEL로 체인을 표준화하고 FastAPI + SSE 스트리밍으로 서빙, 동일 검색기를 재사용해 SOP_GPT와 Claude API 응답을 분할화면으로 실시간 비교
-- LangSmith로 체인 실행 트레이싱 자동 수집
+- 직접 구현한 GPT 디코더(~97M params, 12층)를 단계별로 학습: **Stage 1** 이어쓰기 → **Stage 2** Q&A 파인튜닝 → **Stage 4** 추출형 QA(정답 스팬 위치 분류) → **Stage 5** DPO 선호 학습 완료
+- 검색 점수가 임계값 미만이면 Stage 2(잡담형) 모델로, 이상이면 Stage 4(추출형) 모델로 라우팅. 하이브리드 검색(BM25+FAISS) 도입으로 라우팅 정확도 TF-IDF 단독 73.3% → **82.7%** 향상
+- **LangGraph** StateGraph로 검색 실패 시 임계값을 낮춰가며 최대 2회 재시도하는 retry 루프 구현. `build_graph`(SOP_GPT) / `build_claude_graph` / `build_qwen_graph` / `build_claude_agent_graph`(도구 호출 Agent) 4가지 그래프를 노드 팩토리 10개(SOP_GPT 4 + Claude 4 + Qwen 2)로 조립
+- **Qwen3-1.7B** 로컬 LLM을 두 가지 모드로 통합 — BF16(Transformers + MPS) / Q4_K_M(llama-cpp GGUF). KorQuAD 100문항 기준 Q4_K_M이 BF16보다 **3.3배 빠르고** 정확도 차이 2%p
+- **Claude Haiku가 질문을 자동 분류**(chit_chat / factual / general)해 적합한 체인(basic / langgraph / langchain)을 자동 선택. 4분할 화면(SOP_GPT · Claude · Qwen BF16 · Qwen Q4)에서 동시 비교
+- PBKDF2-HMAC-SHA256 패스워드 해싱 + ID 기반 로그인, `MemorySaver`(단기) + JSON 파일(장기) 이중 메모리 구조
 
-| 모드 | 검색기 | 라우팅 임계값 | 미달 시 폴백 | 비고 |
-|---|---|:--:|---|---|
-| Basic | 없음 | - | Stage 2 직접 생성 | |
-| RAG | TF-IDF + 코사인 유사도 | ≥ 0.25 | Stage 2 직접 생성 | |
-| LangChain | BM25 + FAISS 하이브리드 | ≥ 0.515 | Stage 2 직접 생성 | LCEL 체인 |
-| LangGraph | BM25 + FAISS 하이브리드 | ≥ 0.515 | Stage 2 직접 생성 | 노드 재시도 루프 + Claude Agent 도구 호출 지원 |
+| 모델 | 엔드포인트 | 검색기 | 비고 |
+|---|---|---|---|
+| SOP_GPT | `/chat/auto/stream` | BM25+FAISS | 자동 라우팅, retry 루프 |
+| Claude Haiku | `/chat/claude/auto/stream` | BM25+FAISS | Agent 도구 호출 + 자동 라우팅 |
+| Qwen3 BF16 | `/chat/qwen/langgraph/stream` | BM25+FAISS | Transformers + MPS |
+| Qwen3 Q4_K_M | `/chat/qwen-q/langgraph/stream` | BM25+FAISS | llama-cpp GGUF, 3.3배 빠름 |
 
 자세한 내용 → [LLM_Project/chatbot/README.md](LLM_Project/chatbot/README.md)
+
+---
+
+### Week 09 — GGUF Format
+
+> GGUF Format이 Llama.cpp 기반 로컬 LLM 추론 환경에서 사용되는 이유를 설명하고, 모델 파일 구조와 실행 환경 최적화 관점에서 GGUF가 제공하는 장점을 서술하시오.
+
+**핵심 결론**
+
+- GGUF는 헤더에 **텐서 오프셋을 미리 기록**해두는 파일 구조 덕분에 파싱 없이 바로 **mmap**이 가능하고, Header→Metadata→Tensor 순 **순차 저장**으로 SSD 순차 읽기 성능을 그대로 활용한다.
+- 양자화된 가중치를 파일 자체에 내장해 FP16 대비 Q4는 읽는 양이 **4배** 줄어든다. LLM 추론은 대부분 **Memory Bound**라서 이 대역폭 절감이 연산량 절감보다 체감 성능에 더 크게 기여한다.
+- 메타데이터(Tokenizer, RoPE, Context Length 등)까지 한 파일에 통합해, `config.json`/`tokenizer.json`/`model.safetensors` 등 여러 파일이 필요한 HuggingFace 방식과 달리 `model.gguf` 하나로 배포·실행이 끝난다.
+- 이 구조(mmap + 순차 저장 + 내장 양자화 + 단일 파일)가 "GPU 없이 MacBook·라즈베리파이 등 CPU 환경에서도 가볍게 돈다"는 `llama.cpp`의 목표와 정확히 맞아떨어져 표준 조합으로 쓰인다.
+
+| 항목 | PyTorch(.pt/.safetensors) | GGUF |
+|---|---|---|
+| 목적 | 학습 + 추론 | 추론 전용 |
+| 양자화 | 별도 수행 | 파일에 포함 |
+| 메타데이터 | 여러 파일에 분산 | 하나의 파일에 포함 |
+| Memory Mapping | 제한적 활용 | mmap 기반 최적화 |
+
+자세한 내용 → [09/README.md](09/README.md)
 
 ---
 
@@ -183,11 +206,12 @@ KTB-DeepDive/
 │       ├── images/           # 아키텍처 다이어그램
 │       ├── ragdata/          # RAG 검색용 커스텀 문서
 │       └── source/
-│           ├── app/          # FastAPI 서빙 (chat.py, stream.py, ui.py)
-│           ├── lc/           # LangChain 통합 레이어 (retriever, llm, chain)
+│           ├── app/          # FastAPI 서빙 (app.py, state.py, history.py, streaming.py, static/)
+│           ├── llm/          # LLM 래퍼 (sop_llm.py, claude_llm.py, qwen_llm.py)
+│           ├── lc/           # LangChain 통합 레이어 (retriever, chain, router)
 │           ├── lg/           # LangGraph 파이프라인 레이어
 │           ├── rag/          # TF-IDF 검색기
-│           └── model/        # BPE 토크나이저, GPT 모델, 학습 루프, 체크포인트
+│           └── model/        # BPE 토크나이저, GPT 모델, 학습 루프, 체크포인트 + Qwen3-1.7B
 ├── 02/               # Week 02 — 이터레이터 & 제너레이터
 │   ├── README.md
 │   ├── example1.py   # 기본 크기 비교
@@ -206,6 +230,8 @@ KTB-DeepDive/
 ├── 06/               # Week 06 — Hybrid Search
 │   ├── README.md
 │   └── example.py
-└── 08/               # Week 08 — MCP Context Isolation
+├── 08/               # Week 08 — MCP Context Isolation
+│   └── README.md
+└── 09/               # Week 09 — GGUF Format
     └── README.md
 ```
