@@ -1,3 +1,5 @@
+import traceback
+import uuid
 from fastapi import APIRouter, Query
 
 import state
@@ -57,7 +59,8 @@ def chat_langchain(req: ChatRequest) -> ChatResponse:
 @router.post("/chat/langgraph", response_model=ChatResponse)
 def chat_langgraph(req: ChatRequest) -> ChatResponse:
     try:
-        cfg = {"configurable": {"thread_id": req.thread_id}} if req.thread_id else {}
+        tid = req.thread_id or str(uuid.uuid4())
+        cfg = {"configurable": {"thread_id": tid}}
         result = state.lg_graph.invoke({
             "query": req.question,
             "documents": [],
@@ -73,6 +76,7 @@ def chat_langgraph(req: ChatRequest) -> ChatResponse:
             used_rag=result["used_rag"],
         )
     except Exception:
+        print(traceback.format_exc())
         return ChatResponse(answer=_ERR_GRAPH, retrieved_context="", used_rag=False)
 
 
@@ -103,7 +107,8 @@ def chat_claude_langchain(req: ChatRequest) -> ChatResponse:
 @router.post("/chat/claude/langgraph", response_model=ChatResponse)
 def chat_claude_langgraph(req: ChatRequest) -> ChatResponse:
     try:
-        cfg = {"configurable": {"thread_id": req.thread_id}} if req.thread_id else {}
+        tid = (req.thread_id + ":c") if req.thread_id else str(uuid.uuid4())
+        cfg = {"configurable": {"thread_id": tid}}
         result = state.claude_graph.invoke({
             "query": req.question,
             "documents": [],
@@ -119,6 +124,7 @@ def chat_claude_langgraph(req: ChatRequest) -> ChatResponse:
             used_rag=result["used_rag"],
         )
     except Exception:
+        print(traceback.format_exc())
         return ChatResponse(answer=_ERR_GRAPH, retrieved_context="", used_rag=False)
 
 

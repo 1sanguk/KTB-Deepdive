@@ -138,7 +138,7 @@ chatbot/
 ├── ragdata/                    # RAG 지식 베이스 (파일 추가만으로 인덱스 자동 확장)
 │   ├── rpg/                    # RPG 장르별 문서 (JRPG·ARPG·MMORPG·TRPG·한국 RPG)
 │   └── gamejob/                # 게임 직군·개발 용어·비즈니스 용어
-├── basicdata/                  # 프로젝트 문서 (info.md, eval.md, plan.md)
+├── basicdata/                  # 프로젝트 문서 (info.md, eval.md, plan.md, report.md)
 ├── scripts/                    # 유틸리티 스크립트 (캘리브레이션, 임계값 검증 등)
 └── source/
     ├── app/                    # FastAPI 서빙 레이어
@@ -266,4 +266,4 @@ SSE 이벤트 타입: `mode` · `text` · `text_fallback` · `rag_context` · `s
 - 한국어 멀티세션 대화
 - SNS 데이터 고도화
 
-자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md)
+자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [basicdata/report.md](basicdata/report.md)

@@ -60,8 +60,10 @@ async def sop_rag_stream(
         yield _sse({"type": "done"})
 
 async def sop_lg_stream(graph: CompiledStateGraph, question: str, thread_id: str | None = None) -> AsyncGenerator[str, None]:
+    import uuid
     import state as _state
-    cfg = {"configurable": {"thread_id": thread_id}} if thread_id else {}
+    thread_id = thread_id or str(uuid.uuid4())
+    cfg = {"configurable": {"thread_id": thread_id}}
     q = queue.Queue()
 
     def run():
