@@ -94,15 +94,23 @@ lc_rag_chain    = build_rag_chain(lc_retriever,    qa_llm, span_extractor_fn, RA
 claude_tfidf_chain = build_claude_rag_chain(tfidf_retriever, TFIDF_SIM_THRESHOLD)
 claude_lc_chain    = build_claude_rag_chain(lc_retriever,    RAG_SIM_THRESHOLD)
 
-print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 중...")
-qwen_llm = QwenTransformers(BF16_DIR)
-now_count += 1
-print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 완료.")
+if BF16_DIR.exists():
+    print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 중...")
+    qwen_llm = QwenTransformers(BF16_DIR)
+    now_count += 1
+    print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 완료.")
+else:
+    print(f"[skip] Qwen BF16 모델 없음 — qwen 엔드포인트 비활성화")
+    qwen_llm = None
 
-print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
-qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
-now_count += 1
-print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
+if Q4_PATH.exists():
+    print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
+    qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
+    now_count += 1
+    print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
+else:
+    print(f"[skip] Qwen Q4 모델 없음 — qwen-q 엔드포인트 비활성화")
+    qwen_quant_llm = None
 
 print(f"[{now_count}/{total_count}] LangGraph 파이프라인 빌드 중...")
 lg_graph = build_graph(lc_retriever, qa_llm, span_extractor_fn, GRAPH_SOP_THRESHOLD,
@@ -123,18 +131,18 @@ print(f"[{now_count}/{total_count}] Claude Agent Graph 빌드 완료.")
 
 print(f"[{now_count}/{total_count}] Qwen LangGraph 파이프라인 빌드 중...")
 qwen_graph = build_qwen_graph(lc_retriever, qwen_llm, GRAPH_CLAUDE_THRESHOLD,
-                              checkpointer=MemorySaver())
+                              checkpointer=MemorySaver()) if qwen_llm else None
 qwen_quant_graph = build_qwen_graph(lc_retriever, qwen_quant_llm, GRAPH_CLAUDE_THRESHOLD,
-                                    checkpointer=MemorySaver())
+                                    checkpointer=MemorySaver()) if qwen_quant_llm else None
 now_count += 1
 print(f"[{now_count}/{total_count}] Qwen LangGraph 파이프라인 빌드 완료.")
 
-LANGGRAPH_GRAPHS = {
+LANGGRAPH_GRAPHS = {k: v for k, v in {
     "sop":    lg_graph,
     "claude": claude_graph,
     "qwen":   qwen_graph,
     "qwen-q": qwen_quant_graph,
-}
+}.items() if v is not None}
 
 THREAD_SUFFIXES = {
     "sop":    "",
