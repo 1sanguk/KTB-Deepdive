@@ -10,7 +10,6 @@ from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from sentence_transformers import CrossEncoder
 
 # 코사인 유사도가 음수로 나올 수 있는 건 정상이라, langchain의 [0,1] 범위 검증 경고는 끈다 —
 # 우리는 이 값을 그대로 쓰지 않고 calibrate()의 고정-보정 정규화로 다시 스케일링한다.
@@ -126,9 +125,6 @@ class HybridRetriever:
         self.alpha = alpha
         self.norm_bounds = None
         self._idx_by_passage = {p: i for i, p in enumerate(passages)}
-
-        print(f"[hybrid] Cross-Encoder 로드 중: {RERANK_MODEL_NAME}")
-        self.cross_encoder = CrossEncoder(RERANK_MODEL_NAME)
 
         embeddings = HuggingFaceEmbeddings(
             model_name=EMBED_MODEL_NAME,
