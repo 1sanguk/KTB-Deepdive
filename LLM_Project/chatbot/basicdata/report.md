@@ -70,10 +70,12 @@ ec2-user  7795 49.3 57.3 1872388 1153124 ? R  14:55  0:11 .../python3 .../uvicor
 ```mermaid
 xychart-beta
     title "uvicorn 프로세스 VSZ vs RSS (MB)"
-    x-axis ["VSZ (가상주소공간)", "RSS (실제 상주메모리)"]
+    x-axis ["VSZ", "RSS"]
     y-axis "MB" 0 --> 2000
     bar [1872, 1153]
-``` 이는 PyTorch/CUDA 런타임, 공유 라이브러리, mmap된 모델 파일(GGUF 등)이 실제로 상주하지 않아도 주소공간을 예약하기 때문 — RSS만이 실제 메모리 압박을 반영하는 지표다.
+```
+
+이는 PyTorch/CUDA 런타임, 공유 라이브러리, mmap된 모델 파일(GGUF 등)이 실제로 상주하지 않아도 주소공간을 예약하기 때문 — RSS만이 실제 메모리 압박을 반영하는 지표다.
 - **스레드**: 이 서버는 단일 uvicorn worker 프로세스 안에서 PyTorch/FAISS/BM25 연산이 내부적으로 스레드를 사용한다. `OMP_NUM_THREADS=1`을 `app.py`에서 명시적으로 설정해두었는데(`os.environ["OMP_NUM_THREADS"] = "1"`), 이는 vCPU 1개 환경에서 멀티스레드 연산이 오히려 컨텍스트 스위칭 오버헤드만 늘리는 것을 방지하기 위한 설정으로 보인다.
 
 ## 5. 메모리 상태 시계열 분석
