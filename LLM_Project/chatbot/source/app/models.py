@@ -13,6 +13,7 @@ class GenerateResponse(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     thread_id: str | None = None
+    model: str = "sop"  # langgraph 엔드포인트용: "sop" | "claude" | "qwen" | "qwen-q"
 
     @field_validator("thread_id")
     @classmethod

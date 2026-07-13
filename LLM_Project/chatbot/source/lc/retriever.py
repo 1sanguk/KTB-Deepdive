@@ -37,7 +37,7 @@ CALIBRATION_CACHE = CACHE_DIR / "calibration.json"
 
 def _build_or_load_faiss(passages: list[str], embeddings) -> FAISS:
     """FAISS 인덱스를 캐시에서 로드하거나, 없으면 배치 빌드 후 저장."""
-    if FAISS_CACHE.exists():
+    if (FAISS_CACHE / "index.faiss").exists():
         print("[hybrid] FAISS 캐시 로드 중...")
         return FAISS.load_local(str(FAISS_CACHE), embeddings, allow_dangerous_deserialization=True)
     BATCH = 500

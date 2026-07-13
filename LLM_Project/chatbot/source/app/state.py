@@ -129,6 +129,20 @@ qwen_quant_graph = build_qwen_graph(lc_retriever, qwen_quant_llm, GRAPH_CLAUDE_T
 now_count += 1
 print(f"[{now_count}/{total_count}] Qwen LangGraph 파이프라인 빌드 완료.")
 
+LANGGRAPH_GRAPHS = {
+    "sop":    lg_graph,
+    "claude": claude_graph,
+    "qwen":   qwen_graph,
+    "qwen-q": qwen_quant_graph,
+}
+
+THREAD_SUFFIXES = {
+    "sop":    "",
+    "claude": ":c",
+    "qwen":   ":bf16",
+    "qwen-q": ":q4",
+}
+
 print("=" * 40)
 print("서버 준비 완료. 요청을 받을 수 있습니다.")
 print("=" * 40)

@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-13 — LangGraph 엔드포인트 단일화 + FAISS 캐시 버그 수정](#2026-07-13--langgraph-엔드포인트-단일화--faiss-캐시-버그-수정)
 - [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화 + Claude Agent Graph 서빙 연동 + 코드 구조 리팩토링](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화--claude-agent-graph-서빙-연동)
 - [2026-07-08 — Qwen3-1.7B 도입 + llm/ 디렉토리 재구성 + retry 임계값 검증](#2026-07-08--qwen3-17b-도입--llm-디렉토리-재구성--retry-임계값-검증)
 - [2026-07-07 — 히스토리 누적 버그 수정 + 최소 생성 길이 보장 + uv 패키지 관리 세팅](#2026-07-07--히스토리-누적-버그-수정--최소-생성-길이-보장--uv-패키지-관리-세팅)
@@ -17,6 +18,85 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-07-13 — LangGraph 엔드포인트 단일화 + FAISS 캐시 버그 수정
+
+### LangGraph 스트리밍 엔드포인트 4개 → 1개 통합
+
+기존에 모델별로 분리된 4개의 엔드포인트를 `model` 바디 파라미터를 사용하는 단일 엔드포인트로 통합했다.
+
+**변경 전:**
+| 엔드포인트 | 모델 |
+|---|---|
+| `POST /chat/langgraph/stream` | SOP_GPT |
+| `POST /chat/claude/langgraph/stream` | Claude |
+| `POST /chat/qwen/langgraph/stream` | Qwen3 BF16 |
+| `POST /chat/qwen-q/langgraph/stream` | Qwen3 Q4_K_M |
+
+**변경 후:** `POST /chat/langgraph/stream` 하나로 통합, 바디의 `model` 필드로 모델 선택.
+
+**`source/app/models.py`** — `ChatRequest`에 `model` 필드 추가:
+```python
+class ChatRequest(BaseModel):
+    question: str
+    thread_id: str | None = None
+    model: str = "sop"  # "sop" | "claude" | "qwen" | "qwen-q"
+```
+기본값 `"sop"` — 기존 auto/stream 등 `model`을 보내지 않는 엔드포인트는 영향 없음.
+
+**`source/app/state.py`** — 모델 라우팅 딕셔너리 추가:
+```python
+LANGGRAPH_GRAPHS = {
+    "sop":    lg_graph,
+    "claude": claude_graph,
+    "qwen":   qwen_graph,
+    "qwen-q": qwen_quant_graph,
+}
+THREAD_SUFFIXES = {
+    "sop":    "",
+    "claude": ":c",
+    "qwen":   ":bf16",
+    "qwen-q": ":q4",
+}
+```
+새 모델 추가 시 라우터 파일 수정 없이 딕셔너리 항목만 추가하면 된다.
+
+**`source/app/routers/stream.py`** — 단일 핸들러:
+```python
+@router.post("/chat/langgraph/stream")
+async def chat_langgraph_stream(req: ChatRequest) -> StreamingResponse:
+    graph  = state.LANGGRAPH_GRAPHS.get(req.model, state.lg_graph)
+    suffix = state.THREAD_SUFFIXES.get(req.model, "")
+    tid    = (req.thread_id + suffix) if (req.thread_id and suffix) else req.thread_id
+    return StreamingResponse(sop_lg_stream(graph, req.question, thread_id=tid), ...)
+```
+
+**`source/app/static/index.html`** — `streamPanelWith()`에 `model` 파라미터 추가:
+```javascript
+streamPanelWith('/chat/langgraph/stream', question, 'messages-qwen',   ..., signal, 'qwen');
+streamPanelWith('/chat/langgraph/stream', question, 'messages-qwen-q', ..., signal, 'qwen-q');
+```
+`model`이 있을 때만 바디에 포함: `{ ...(model && { model }) }`.
+
+---
+
+### FAISS 캐시 존재 체크 버그 수정 (`source/lc/retriever.py`)
+
+**버그**: `FAISS_CACHE.exists()`가 디렉토리(`faiss_index/`) 존재 여부를 체크하는데, 디렉토리는 있지만 실제 인덱스 파일(`index.faiss`)이 없는 상태에서 서버가 `RuntimeError: could not open index.faiss for reading`으로 죽었다.
+
+**원인**: Git에서 클론하거나 캐시를 부분 삭제하면 디렉토리는 남지만 파일이 없는 상황 발생.
+
+**수정**: 파일 레벨로 체크 변경.
+```python
+# 수정 전
+if FAISS_CACHE.exists():
+
+# 수정 후
+if (FAISS_CACHE / "index.faiss").exists():
+```
+이제 파일이 없으면 빌드 경로로 진입해 FAISS 인덱스를 새로 생성한다.
 
 ---
 

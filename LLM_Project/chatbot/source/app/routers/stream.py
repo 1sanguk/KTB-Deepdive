@@ -52,17 +52,11 @@ async def chat_langchain_stream(req: ChatRequest) -> StreamingResponse:
 
 @router.post("/chat/langgraph/stream")
 async def chat_langgraph_stream(req: ChatRequest) -> StreamingResponse:
+    graph  = state.LANGGRAPH_GRAPHS.get(req.model, state.lg_graph)
+    suffix = state.THREAD_SUFFIXES.get(req.model, "")
+    tid    = (req.thread_id + suffix) if (req.thread_id and suffix) else req.thread_id
     return StreamingResponse(
-        sop_lg_stream(state.lg_graph, req.question, thread_id=req.thread_id),
-        media_type="text/event-stream",
-    )
-
-
-@router.post("/chat/claude/langgraph/stream")
-async def chat_claude_langgraph_stream(req: ChatRequest) -> StreamingResponse:
-    claude_tid = (req.thread_id + ":c") if req.thread_id else None
-    return StreamingResponse(
-        sop_lg_stream(state.claude_graph, req.question, thread_id=claude_tid),
+        sop_lg_stream(graph, req.question, thread_id=tid),
         media_type="text/event-stream",
     )
 
@@ -120,19 +114,3 @@ async def chat_claude_auto_stream(req: ChatRequest) -> StreamingResponse:
     )
 
 
-@router.post("/chat/qwen/langgraph/stream")
-async def chat_qwen_langgraph_stream(req: ChatRequest) -> StreamingResponse:
-    qwen_tid = (req.thread_id + ":bf16") if req.thread_id else None
-    return StreamingResponse(
-        sop_lg_stream(state.qwen_graph, req.question, thread_id=qwen_tid),
-        media_type="text/event-stream",
-    )
-
-
-@router.post("/chat/qwen-q/langgraph/stream")
-async def chat_qwen_quant_langgraph_stream(req: ChatRequest) -> StreamingResponse:
-    qwen_tid = (req.thread_id + ":q4") if req.thread_id else None
-    return StreamingResponse(
-        sop_lg_stream(state.qwen_quant_graph, req.question, thread_id=qwen_tid),
-        media_type="text/event-stream",
-    )

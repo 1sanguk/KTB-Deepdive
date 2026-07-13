@@ -222,13 +222,13 @@
       abortController = new AbortController();
       const signal = abortController.signal;
 
-      streamPanelWith('/chat/auto/stream',               question, 'messages-sop',    'assistant',            signal);
-      streamPanelWith('/chat/claude/auto/stream',        question, 'messages-claude', 'assistant claude-msg', signal);
-      streamPanelWith('/chat/qwen/langgraph/stream',     question, 'messages-qwen',   'assistant qwen-msg',   signal);
-      streamPanelWith('/chat/qwen-q/langgraph/stream',   question, 'messages-qwen-q', 'assistant qwen-q-msg', signal);
+      streamPanelWith('/chat/auto/stream',        question, 'messages-sop',    'assistant',            signal);
+      streamPanelWith('/chat/claude/auto/stream', question, 'messages-claude', 'assistant claude-msg', signal);
+      streamPanelWith('/chat/langgraph/stream',   question, 'messages-qwen',   'assistant qwen-msg',   signal, 'qwen');
+      streamPanelWith('/chat/langgraph/stream',   question, 'messages-qwen-q', 'assistant qwen-q-msg', signal, 'qwen-q');
     }
 
-    async function streamPanelWith(endpoint, question, containerId, msgClass, signal) {
+    async function streamPanelWith(endpoint, question, containerId, msgClass, signal, model = null) {
       const box = document.getElementById(containerId);
       const statusDiv = addMsg(containerId, 'assistant loading', '분류 중…');
       let answerDiv = null;
@@ -238,7 +238,7 @@
         const res = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, thread_id: currentUserId || null }),
+          body: JSON.stringify({ question, thread_id: currentUserId || null, ...(model && { model }) }),
           signal,
         });
 
