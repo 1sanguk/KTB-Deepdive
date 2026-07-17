@@ -266,4 +266,4 @@ SSE 이벤트 타입: `mode` · `text` · `text_fallback` · `rag_context` · `s
 - 한국어 멀티세션 대화
 - SNS 데이터 고도화
 
-자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [basicdata/report.md](basicdata/report.md)
+자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [basicdata/report.md](basicdata/report.md) · HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md)
