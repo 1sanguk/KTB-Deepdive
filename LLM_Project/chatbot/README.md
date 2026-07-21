@@ -230,6 +230,35 @@ uv run uvicorn app:app
 source .venv/bin/activate && uvicorn app:app
 ```
 
+### Docker로 실행 (EC2 배포)
+
+모델 파일(.pt, GGUF)이 이미지에 포함되어 있어 별도 다운로드 없이 바로 실행 가능합니다.
+
+**로컬 빌드 & 실행**
+```bash
+docker compose up --build          # 빌드 후 실행
+docker compose up -d               # 백그라운드 실행
+docker compose down                # 중지
+```
+
+**EC2용 amd64 이미지 빌드 & 푸시 (Mac Apple Silicon 환경)**
+```bash
+docker buildx build --platform linux/amd64 -t <dockerhub-user>/chatbot:latest --push .
+```
+
+**EC2에서 실행**
+```bash
+# 필요 디렉토리 생성
+mkdir -p source/data/history source/.cache
+
+# api_keys 파일과 docker-compose.yml 복사 후
+docker compose pull
+docker compose up -d
+```
+
+EC2 권장 사양: t3.medium (2 vCPU, 4GB RAM), EBS 25GB 이상  
+볼륨 마운트: `source/data/` (사용자·대화 이력), `source/.cache/` (FAISS 인덱스)
+
 ### 모델 학습
 
 ```bash

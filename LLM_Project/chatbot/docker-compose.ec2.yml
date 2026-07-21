@@ -1,0 +1,11 @@
+services:
+  chatbot:
+    image: parksteve/chatbot:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - api_keys
+    volumes:
+      - ./source/data:/app/source/data
+      - ./source/.cache:/app/source/.cache
+    restart: unless-stopped

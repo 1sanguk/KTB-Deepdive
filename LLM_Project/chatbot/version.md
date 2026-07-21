@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-21 — Docker 컨테이너 패키징 + AWS EC2 배포](#2026-07-21--docker-컨테이너-패키징--aws-ec2-배포)
 - [2026-07-13 — LangGraph 엔드포인트 단일화 + FAISS 캐시 버그 수정](#2026-07-13--langgraph-엔드포인트-단일화--faiss-캐시-버그-수정)
 - [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화 + Claude Agent Graph 서빙 연동 + 코드 구조 리팩토링](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화--claude-agent-graph-서빙-연동)
 - [2026-07-08 — Qwen3-1.7B 도입 + llm/ 디렉토리 재구성 + retry 임계값 검증](#2026-07-08--qwen3-17b-도입--llm-디렉토리-재구성--retry-임계값-검증)
@@ -18,6 +19,97 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-07-21 — Docker 컨테이너 패키징 + AWS EC2 배포
+
+### 추가된 파일
+
+| 파일 | 역할 |
+|---|---|
+| `Dockerfile` | python:3.12-slim 기반 이미지 빌드 정의 |
+| `docker-compose.yml` | 포트·볼륨·환경변수 설정 |
+| `requirements.txt` | `uv export --no-dev --no-hashes`로 생성한 의존성 목록 |
+| `.dockerignore` | 이미지에서 제외할 파일 목록 |
+
+### Dockerfile
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y build-essential cmake
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY source/ ./source/
+COPY ragdata/ ./ragdata/
+RUN mkdir -p source/data/history source/.cache
+WORKDIR /app/source/app
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+**WORKDIR을 `source/app`으로 설정한 이유**: `app.py`가 `import state` 시 CWD를 기준으로 탐색한다. 로컬에서는 `source/app/`에서 실행하므로 `state.py`가 CWD에 있었지만, `source/`를 WORKDIR로 잡으면 `state.py`를 찾지 못해 `ModuleNotFoundError` 발생.
+
+### docker-compose.yml
+
+```yaml
+services:
+  chatbot:
+    image: parksteve/chatbot:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - api_keys
+    volumes:
+      - ./source/data:/app/source/data
+      - ./source/.cache:/app/source/.cache
+    restart: unless-stopped
+```
+
+모델 파일(`.pt`, GGUF)은 이미지에 포함. `source/data/`(사용자·히스토리)와 `source/.cache/`(FAISS 인덱스)만 볼륨으로 영속화.
+
+### .dockerignore
+
+```
+source/model/qwen/Qwen3-1.7B-BF16.gguf   # HuggingFace 폴더와 중복 — 3.2GB 절감
+**/__pycache__
+**/*.pyc
+source/.cache
+basicdata / docs / scripts / images
+```
+
+`Qwen3-1.7B-BF16.gguf`(3.2GB)는 `Qwen3-1.7B/`(HuggingFace safetensors, 3.8GB)와 동일 모델의 다른 포맷으로 중복. 제외 후 이미지 크기 11.7GB → 약 8.5GB.
+
+### requirements.txt 수정
+
+`uv export`로 자동 생성된 `dataclasses==0.8` 제거. Python 3.12에는 `dataclasses`가 표준 라이브러리에 포함되어 있어 설치 불가 (`No matching distribution found` 오류).
+
+### AWS EC2 배포 방법
+
+```bash
+# 로컬 Mac — linux/amd64로 빌드 & push (Apple Silicon 크로스 컴파일)
+docker buildx build --platform linux/amd64 -t parksteve/chatbot:latest --push .
+
+# EC2 — Docker 설치 (Amazon Linux)
+sudo yum install docker -y && sudo systemctl start docker && sudo systemctl enable docker
+sudo usermod -aG docker ec2-user
+
+# Docker Compose 플러그인 설치
+sudo mkdir -p /usr/local/lib/docker/cli-plugins
+sudo curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose && sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# EC2에서 실행
+docker pull parksteve/chatbot:latest
+docker compose up -d
+```
+
+**EC2 사양 요구사항**: t3.medium 이상(2 vCPU, 4GB RAM), EBS 25GB 이상.
+이미지 pull 시 레이어 압축 해제로 디스크를 약 2배 사용 → 8.5GB 이미지에 약 17GB 임시 공간 필요.
+
+### MPS → CPU 자동 폴백
+
+`model.py`의 `cuda → mps → cpu` 폴백 덕분에 코드 수정 없이 Docker(Linux) 환경에서 CPU 모드로 자동 전환.
 
 ---
 
