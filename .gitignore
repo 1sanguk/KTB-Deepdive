@@ -21,6 +21,7 @@ test.py
 train_all.sh
 
 # ── 허용 (위 규칙 예외) ────────────────────────────────
+!LLM_Project/chatbot/ragdata/**
 !eval.md
 !plan.md
 !README*.md
