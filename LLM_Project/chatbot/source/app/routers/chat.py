@@ -5,7 +5,12 @@ from fastapi import APIRouter, Query
 import state
 from auth import login_or_register
 from llm.claude_llm import ask_claude
-from models import AuthRequest, AuthResponse, ChatRequest, ChatResponse, GenerateRequest, GenerateResponse
+from models import (
+    AuthRequest, AuthResponse, ChatRequest, ChatResponse,
+    GenerateRequest, GenerateResponse,
+    SessionCreateRequest, SessionRenameRequest,
+)
+from sessions import list_sessions, create_session, rename_session
 
 router = APIRouter()
 
@@ -14,10 +19,37 @@ _ERR_RAG  = "[오류] 검색 중 오류가 발생했습니다."
 _ERR_GRAPH = "[오류] 파이프라인 실행 중 오류가 발생했습니다."
 
 
+def _tid(thread_id: str) -> str:
+    return thread_id.strip().lower()
+
+
 @router.post("/auth/login", response_model=AuthResponse)
 def auth_login(req: AuthRequest) -> AuthResponse:
     ok, msg = login_or_register(req.user_id, req.password)
     return AuthResponse(ok=ok, msg=msg)
+
+
+# ── 세션 관리 ──────────────────────────────────────────────────────────────────
+
+@router.get("/sessions")
+def get_sessions(user_id: str = Query(...)):
+    return {"sessions": list_sessions(user_id.strip().lower())}
+
+
+@router.post("/sessions")
+def post_session(req: SessionCreateRequest):
+    return create_session(req.user_id, req.name)
+
+
+@router.patch("/sessions/{session_id}")
+def patch_session(session_id: str, req: SessionRenameRequest):
+    ok = rename_session(req.user_id, session_id, req.name)
+    return {"ok": ok}
+
+
+@router.get("/chat/compare/history")
+def get_compare_history(thread_id: str = Query(...)):
+    return {"messages": state.load_history(thread_id.strip().lower())}
 
 
 @router.post("/generate", response_model=GenerateResponse)
@@ -130,37 +162,37 @@ def chat_claude_langgraph(req: ChatRequest) -> ChatResponse:
 
 @router.get("/chat/basic/history")
 def get_basic_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid)}
 
 @router.get("/chat/claude/basic/history")
 def get_claude_basic_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid + ":c")}
 
 @router.get("/chat/rag/history")
 def get_rag_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid)}
 
 @router.get("/chat/claude/rag/history")
 def get_claude_rag_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid + ":c")}
 
 @router.get("/chat/langchain/history")
 def get_langchain_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid)}
 
 @router.get("/chat/claude/langchain/history")
 def get_claude_langchain_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid + ":c")}
 
 @router.get("/chat/langgraph/history")
 def get_langgraph_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     # MemorySaver에 당세션 데이터 있으면 우선 사용, 없으면 JSON 파일에서 로드
     try:
         snap = state.lg_graph.get_state({"configurable": {"thread_id": tid}})
@@ -173,7 +205,7 @@ def get_langgraph_history(thread_id: str = Query(...)):
 
 @router.get("/chat/claude/langgraph/history")
 def get_claude_langgraph_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     claude_tid = tid + ":c"
     try:
         snap = state.claude_graph.get_state({"configurable": {"thread_id": claude_tid}})
@@ -186,11 +218,11 @@ def get_claude_langgraph_history(thread_id: str = Query(...)):
 
 @router.get("/chat/auto/history")
 def get_auto_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid)}
 
 
 @router.get("/chat/claude/auto/history")
 def get_claude_auto_history(thread_id: str = Query(...)):
-    tid = thread_id.strip().lower()
+    tid = _tid(thread_id)
     return {"messages": state.load_history(tid + ":c")}

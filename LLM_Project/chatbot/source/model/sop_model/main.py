@@ -1,5 +1,6 @@
 import builtins
 import gc
+import json
 import os
 import random
 import sys
@@ -217,7 +218,7 @@ def train_dpo(model):
 
     사전에 scripts/make_dpo_data.py를 실행해 dpo_data.json을 생성해야 한다.
     """
-    import json
+    # 지연 로딩: dpo.py가 torch DPO 루프를 포함하므로 train_dpo() 호출 시에만 로드.
     from dpo import run_dpo
 
     dpo_data_path = Path(__file__).resolve().parent / "dpo_data.json"

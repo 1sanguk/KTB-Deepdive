@@ -70,6 +70,7 @@ def load_korquad_qa_pairs(root_dir=None, include_train=False):
 
 def load_korquad_qa_data(root_dir=None):
     """KorQuAD v1.0 train+dev -> "질문: ...\\n답변: ...<EOS>\\n" 포맷 문자열 (Stage 2 fine-tuning용)."""
+    # bpe.py는 model/ 경로에 있어 rag/ 에서 상단 import 시 경로 문제가 생긴다.
     from bpe import EOS_TOKEN
     pairs = load_korquad_qa_pairs(root_dir, include_train=True)
     print(f"KorQuAD QA pairs loaded: {len(pairs):,}")

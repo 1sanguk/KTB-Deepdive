@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "LLM_Project/chatbot/**"
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
@@ -34,6 +35,7 @@ jobs:
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/chatbot:buildcache,mode=max
 
       - name: Deploy to EC2
+        if: github.event_name == 'workflow_dispatch'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.EC2_HOST }}

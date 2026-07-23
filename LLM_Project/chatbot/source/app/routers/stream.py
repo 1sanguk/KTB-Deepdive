@@ -4,7 +4,11 @@ from fastapi.responses import StreamingResponse
 import state
 from llm.claude_llm import stream_claude
 from models import ChatRequest
-from streaming import _sse, sop_stream, sop_rag_stream, sop_lg_stream, claude_rag_stream, with_history, auto_sop_stream, auto_claude_stream
+from streaming import (
+    _sse, sop_stream, sop_rag_stream, sop_lg_stream,
+    claude_rag_stream, with_history, auto_sop_stream, auto_claude_stream,
+    compare_stream, session_judge_stream,
+)
 
 router = APIRouter()
 
@@ -110,6 +114,22 @@ async def chat_auto_stream(req: ChatRequest) -> StreamingResponse:
 async def chat_claude_auto_stream(req: ChatRequest) -> StreamingResponse:
     return StreamingResponse(
         auto_claude_stream(req.question, req.thread_id),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/compare/stream")
+async def chat_compare_stream(req: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        compare_stream(req.question, req.thread_id),
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/chat/compare/judge/stream")
+async def chat_compare_judge_stream(req: ChatRequest) -> StreamingResponse:
+    return StreamingResponse(
+        session_judge_stream(req.thread_id),
         media_type="text/event-stream",
     )
 

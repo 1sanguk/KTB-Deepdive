@@ -55,6 +55,7 @@ def load_chatbot_qa_pairs(root_dir=None):
 
 def load_chatbot_qa_data(root_dir=None):
     """Q&A 쌍을 "질문: ...\\n답변: ...<|endoftext|>\\n" 포맷으로 반환 (Stage 2 fine-tuning용)."""
+    # bpe.py가 같은 패키지 안에 있어 런타임 경로에서만 import 가능하다.
     from bpe import EOS_TOKEN
     return "".join(
         f"질문: {q}\n답변: {a}{EOS_TOKEN}\n"
@@ -146,6 +147,7 @@ def load_aihub_conversation_data(aihub_dir=None, training_only=True, max_chars=N
 
 
 def download_kowikitext_data(root_dir=None, force_download=False):
+    # Korpora는 다운로드 시에만 필요하므로 지연 로딩. 학습 루틴에서 항상 실행되지 않는다.
     from Korpora.korpus_kowiki import KOWIKI_FETCH_INFORMATION
     from Korpora.utils import fetch
 

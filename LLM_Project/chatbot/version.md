@@ -2,7 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
-- [2026-07-21 — Docker 컨테이너 패키징 + AWS EC2 배포](#2026-07-21--docker-컨테이너-패키징--aws-ec2-배포)
+- [2026-07-23 — 4모델 비교 UI + Gemini Judge + Docker + CI/CD](#2026-07-23--4모델-비교-ui--gemini-judge--docker--cicd)
 - [2026-07-13 — LangGraph 엔드포인트 단일화 + FAISS 캐시 버그 수정](#2026-07-13--langgraph-엔드포인트-단일화--faiss-캐시-버그-수정)
 - [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화 + Claude Agent Graph 서빙 연동 + 코드 구조 리팩토링](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화--claude-agent-graph-서빙-연동)
 - [2026-07-08 — Qwen3-1.7B 도입 + llm/ 디렉토리 재구성 + retry 임계값 검증](#2026-07-08--qwen3-17b-도입--llm-디렉토리-재구성--retry-임계값-검증)
@@ -22,9 +22,157 @@
 
 ---
 
-## 2026-07-21 — Docker 컨테이너 패키징 + AWS EC2 배포
+## 2026-07-23 — 4모델 비교 UI + Gemini Judge + Docker + CI/CD
 
-### 추가된 파일
+### 핵심 변경 목적
+
+기존 자동 라우팅 단일 채팅 UI를 4개 모델(SOP_GPT · Claude · Qwen BF16 · Qwen Q4_K_M)을 동시에 병렬 실행해 결과를 비교하는 경연 방식 UI로 전환했다. Claude가 자신의 답변을 평가하는 자기 편향 문제를 해결하기 위해 Gemini Flash를 외부 Judge로 도입했다.
+
+---
+
+### 신규 파일
+
+| 파일 | 역할 |
+|---|---|
+| `source/llm/gemini_llm.py` | Google Gemini API 연동 — `stream_gemini()` 스트리밍 생성기 |
+
+---
+
+### 4모델 병렬 비교 스트리밍 (`source/app/streaming.py`)
+
+**`compare_stream(question, thread_id)`** — 4개 모델을 `asyncio.Task`로 동시 실행:
+
+```
+run_sop()    → threading.Thread + asyncio.Queue (동기 PyTorch → 비동기 브리지)
+run_claude() → stream_claude() async generator
+run_qwen_model("qwen",   qwen_llm)   → run_in_executor
+run_qwen_model("qwen-q", qwen_quant) → run_in_executor
+```
+
+각 모델이 텍스트를 보낼 때마다 `model_text` 이벤트, 완료 시 `model_done` 이벤트를 SSE로 전송. 4개 완료 후 Gemini Judge가 최선 답변을 선정하고 `judge_done` 이벤트로 `best_model` / `best_text` 반환.
+
+**`session_judge_stream(thread_id)`** — 세션 전체 대화를 Gemini에게 종합 평가 요청. `max_tokens=None`으로 토큰 한도 없이 스트리밍.
+
+**신규 SSE 이벤트 타입:**
+
+| 이벤트 | 포함 필드 | 설명 |
+|---|---|---|
+| `model_text` | `model`, `text` | 각 모델의 스트리밍 텍스트 (누적) |
+| `model_done` | `model` | 모델 완료 신호 |
+| `judge_text` | `text` | Gemini Judge 스트리밍 텍스트 (누적) |
+| `judge_done` | `best_model`, `best_text` | 최선 모델 선정 결과 |
+
+---
+
+### Gemini Judge 도입 (`source/llm/gemini_llm.py`)
+
+Claude가 4개 답변 중 자신의 답변을 평가하면 자기 편향(self-bias)으로 항상 Claude를 선택하는 문제를 해결하기 위해 Google Gemini Flash를 외부 Judge로 사용했다.
+
+```python
+MODEL = "gemini-flash-latest"   # gemini-2.0-flash는 무료 tier limit=0 → 동작 안 함
+
+async def stream_gemini(prompt: str, max_tokens: int | None = 1024) -> AsyncGenerator[str, None]:
+    config = {"max_output_tokens": max_tokens} if max_tokens is not None else {}
+    accumulated = ""
+    async for chunk in await client.aio.models.generate_content_stream(...):
+        if chunk.text:
+            accumulated += chunk.text
+            yield accumulated  # 매 yield마다 누적 전체 텍스트 반환
+```
+
+`google-genai` 패키지를 `requirements.txt`에 추가. `api_keys` 파일에 `GEMINI_API_KEY` 환경변수 추가.
+
+---
+
+### 신규 엔드포인트 (`source/app/routers/stream.py`)
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `POST /chat/compare/stream` | 4모델 병렬 비교 SSE 스트림 |
+| `POST /chat/compare/judge/stream` | 세션 종합 평가 SSE 스트림 |
+
+---
+
+### UI 전면 개편 (`source/app/static/index.html`, `style.css`)
+
+#### 레이아웃
+
+- **왼쪽 패널**: 세션 목록 + 새 채팅 버튼
+- **중앙 패널**: 채팅 버블 (최선 모델 답변 표시, 마크다운 렌더링)
+- **오른쪽 패널**: 4개 아코디언(SOP · Claude · BF16 · Q4) + Judge 패널 + 세션 종합 평가
+
+#### 주요 기능
+
+**마크다운 렌더링**: `marked.js` CDN 추가. `marked.use({ breaks: true, gfm: true })`로 GitHub Flavored Markdown 지원. 챗 버블, 아코디언 바디, Judge 패널 모두 `innerHTML = md(text)` 방식으로 렌더링.
+
+**응답 시간 측정**: 각 모델별 `streamStartTime` 기준 경과 시간을 `model_done` 이벤트 수신 시점에 계산해 아코디언 헤더 status 배지에 `완료 · 1.2s` 형식으로 표시.
+
+**모델 승률 통계 바** (`#win-stats-bar`): 세션 내 Judge가 선택한 횟수를 모델별로 누적. `선택횟수: SOP 0 · Claude 0 · BF16 0 · Q4 0` 형태로 상시 표시. 최다 선택 모델은 amber 색상 강조 (`.win-stat.leader`).
+
+**답변 복사 버튼** (`⎘`): 아코디언 헤더에 상시 표시. 클릭 시 `navigator.clipboard.writeText(body.innerText)`로 복사, 1.2초 후 `✓` → `⎘` 복원.
+
+**세션 대화 내보내기** (`⬇ 대화`): 현재 세션 전체 턴을 마크다운 형식으로 변환해 `.md` 파일로 다운로드.
+
+**드래그 리사이즈**: 아코디언 바디 하단과 세션 종합 평가 패널 상단에 `mousedown/mousemove/mouseup` 기반 드래그 핸들 추가. `maxHeight` 인라인 스타일 덮어쓰기 방식.
+
+**세션 이름 변경 버튼**: 더블클릭 방식 → `✏` 아이콘 버튼 항상 표시. 클릭 시 `contenteditable` 인라인 편집.
+
+**세션 종합 평가 다운로드**: Gemini Judge 세션 평가 결과를 `.md` 파일로 다운로드.
+
+**아코디언 기본 스크롤**: 드래그 리사이즈 없이도 `max-height: 220px; overflow-y: auto`로 아코디언 내부 스크롤 가능. 드래그 후 `maxHeight` 인라인 스타일이 CSS를 덮어써 확장됨.
+
+---
+
+### 버그 수정
+
+**SSE 파싱 오류**: `buf.split('\\n\\n')` (자바스크립트 리터럴 역슬래시-n)이 실제 개행문자 두 개가 아닌 4글자 문자열로 분리해 이벤트를 전혀 파싱하지 못하는 버그. `buf.split('\n\n')` (실제 개행)으로 수정.
+
+---
+
+### GitHub Actions CI/CD 파이프라인
+
+#### 추가된 파일
+
+| 파일 | 역할 |
+|---|---|
+| `.github/workflows/deploy.yml` | 코드 push 시 자동 빌드·배포 워크플로우 |
+| `docker-compose.ec2.yml` | EC2 전용 Compose 파일 (`image:` 사용, 볼륨 마운트 포함) |
+
+#### 워크플로우 구조
+
+```
+push to main (LLM_Project/chatbot/** 변경 시)
+  → Docker Buildx로 linux/amd64 이미지 빌드
+  → Docker Hub push (parksteve/chatbot:latest 갱신)
+  → SSH로 EC2 접속 → docker compose pull && up -d && prune
+```
+
+- **paths 트리거**: `LLM_Project/chatbot/**` 하위 변경 시에만 실행 — 다른 주차 과제 push에 불필요한 빌드 방지
+- **빌드 캐시**: `type=registry`로 Docker Hub에 캐시 레이어 저장 → 코드만 바뀌었을 때 이미지 레이어 재사용으로 빌드 시간 단축
+- **EC2 배포 비활성화**: `workflow_dispatch` 트리거로 수동 실행 가능, EC2가 꺼져있을 때는 GitHub UI에서 워크플로우 비활성화 또는 수동 트리거만 사용
+
+#### GitHub Secrets 등록 항목
+
+| Secret | 내용 |
+|---|---|
+| `DOCKERHUB_USERNAME` | Docker Hub 계정명 |
+| `DOCKERHUB_TOKEN` | Docker Hub Access Token |
+| `EC2_HOST` | EC2 퍼블릭 IP |
+| `EC2_KEY` | KTB.pem 전체 내용 |
+
+#### .gitignore 수정
+
+`*.md` 패턴이 `ragdata/` 하위 마크다운 파일을 gitignore하고 있어 Docker 빌드 컨텍스트에서 누락됨. 예외 규칙 추가:
+
+```
+!LLM_Project/chatbot/ragdata/**
+```
+
+---
+
+### Docker 컨테이너 패키징 + AWS EC2 배포
+
+#### 추가된 파일
 
 | 파일 | 역할 |
 |---|---|
@@ -33,7 +181,7 @@
 | `requirements.txt` | `uv export --no-dev --no-hashes`로 생성한 의존성 목록 |
 | `.dockerignore` | 이미지에서 제외할 파일 목록 |
 
-### Dockerfile
+#### Dockerfile
 
 ```dockerfile
 FROM python:3.12-slim
@@ -50,7 +198,7 @@ CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
 
 **WORKDIR을 `source/app`으로 설정한 이유**: `app.py`가 `import state` 시 CWD를 기준으로 탐색한다. 로컬에서는 `source/app/`에서 실행하므로 `state.py`가 CWD에 있었지만, `source/`를 WORKDIR로 잡으면 `state.py`를 찾지 못해 `ModuleNotFoundError` 발생.
 
-### docker-compose.yml
+#### docker-compose.yml
 
 ```yaml
 services:
@@ -68,7 +216,7 @@ services:
 
 모델 파일(`.pt`, GGUF)은 이미지에 포함. `source/data/`(사용자·히스토리)와 `source/.cache/`(FAISS 인덱스)만 볼륨으로 영속화.
 
-### .dockerignore
+#### .dockerignore
 
 ```
 source/model/qwen/Qwen3-1.7B-BF16.gguf   # HuggingFace 폴더와 중복 — 3.2GB 절감
@@ -80,11 +228,11 @@ basicdata / docs / scripts / images
 
 `Qwen3-1.7B-BF16.gguf`(3.2GB)는 `Qwen3-1.7B/`(HuggingFace safetensors, 3.8GB)와 동일 모델의 다른 포맷으로 중복. 제외 후 이미지 크기 11.7GB → 약 8.5GB.
 
-### requirements.txt 수정
+#### requirements.txt 수정
 
 `uv export`로 자동 생성된 `dataclasses==0.8` 제거. Python 3.12에는 `dataclasses`가 표준 라이브러리에 포함되어 있어 설치 불가 (`No matching distribution found` 오류).
 
-### AWS EC2 배포 방법
+#### AWS EC2 배포 방법
 
 ```bash
 # 로컬 Mac — linux/amd64로 빌드 & push (Apple Silicon 크로스 컴파일)
@@ -107,7 +255,110 @@ docker compose up -d
 **EC2 사양 요구사항**: t3.medium 이상(2 vCPU, 4GB RAM), EBS 25GB 이상.
 이미지 pull 시 레이어 압축 해제로 디스크를 약 2배 사용 → 8.5GB 이미지에 약 17GB 임시 공간 필요.
 
-### MPS → CPU 자동 폴백
+---
+
+### 신뢰성 강화 · LangGraph compare 완전 연동
+
+#### `claude_llm.py` — `stream_claude()` 재시도 로직
+
+529(Overloaded) / 503 / 429 + API 연결 오류를 `_is_retryable()`로 분류해 최대 2회 자동 재시도.
+HTTP 200이지만 토큰이 0개인 **빈 응답**도 동일하게 재시도.
+
+```python
+_STREAM_MAX_RETRIES = 2
+_STREAM_RETRY_DELAY = 2.0  # seconds
+
+def _is_retryable(e: Exception) -> bool:
+    if isinstance(e, anthropic.APIStatusError):
+        return e.status_code in (429, 503, 529)
+    if isinstance(e, anthropic.APIConnectionError):
+        return True
+    return False
+```
+
+재시도 대기 중에는 `[서버 과부하, N초 후 재시도 중...]` 메시지를 먼저 yield해 사용자에게 상태를 알린다.
+
+#### `claude_llm.py` — RAG 프롬프트 폴백 지시
+
+기존 프롬프트가 "참고 문서를 **바탕으로**" 답하라고 제한하여 Claude가 문서 범위 밖 질문을 거부하는 문제.
+
+수정: "참고하여"로 변경 + "문서에 직접적인 내용이 없으면 일반 지식을 바탕으로 답변하세요" 추가.
+`ask_claude_with_context()`와 `stream_claude()`(RAG 경로) 양쪽에 동일하게 적용.
+
+#### `gemini_llm.py` — 502/Bad Gateway 재시도 추가
+
+`_is_retryable()`이 503/429만 처리했으나 Gemini가 일시 과부하 시 502를 반환하는 경우를 추가.
+
+```python
+def _is_retryable(e: Exception) -> bool:
+    msg = str(e)
+    return (
+        "503" in msg or "UNAVAILABLE" in msg
+        or "502" in msg or "Bad Gateway" in msg
+        or "429" in msg or "RESOURCE_EXHAUSTED" in msg
+    )
+```
+
+#### `streaming.py` — compare_stream LangGraph 완전 연동
+
+기존 `compare_stream()`의 4개 모델이 각자의 LLM을 직접 호출하던 방식을 단일 함수로 통합:
+
+```
+이전: run_sop() / run_claude() / run_qwen_model(key) — LLM 직접 호출
+이후: run_via_lg(key, graph)                          — 전용 LangGraph 그래프 경유
+```
+
+각 모델이 `lg_graph / claude_graph / qwen_graph / qwen_quant_graph`를 통해
+RAG 검색 → 관련성 평가 → span 추출 or 직접 생성 흐름을 거친다.
+
+**`config` 파라미터 추가 이유**: 각 그래프가 `MemorySaver`로 컴파일되어 있어
+`thread_id` 없이 `graph.stream()` 호출 시 `ValueError: Checkpointer requires configurable keys: thread_id` 발생.
+suffix로 4개 모델을 서로 다른 thread에서 격리.
+
+```python
+suffix = {"sop": "", "claude": ":c", "qwen": ":bf16", "qwen-q": ":q4"}[key]
+cfg = {"configurable": {"thread_id": base + suffix}}
+```
+
+#### `streaming.py` — Judge 파싱 강건화 (`_parse_best_model`)
+
+Gemini가 judge_prompt 형식을 정확히 따르지 않고 자연어로 마무리하거나 `[모델명]` 형태로 반환 → 파싱 실패 → UI에 "오류-N.Ns" 표시.
+
+**2단계 파싱으로 강건화:**
+
+```python
+_MODEL_KEYWORDS = [
+    ("qwen-q", ["qwen q4", "qwen-q", "q4_k", "양자화 qwen"]),
+    ("qwen",   ["qwen bf16", "qwen bf", "bf16"]),
+    ("claude", ["claude"]),
+    ("sop",    ["sop_gpt", "sop gpt"]),
+]
+
+def _parse_best_model(text: str) -> str | None:
+    # 1차: 정규식 (대괄호·공백 허용)
+    m = re.search(r'최고\s*모델[:\s]+\[?([\w-]+)', text)
+    if m and m.group(1).lower() in ("sop", "claude", "qwen", "qwen-q"):
+        return m.group(1).lower()
+    # 2차: 마지막 200자 키워드 추론
+    tail = text[-200:].lower()
+    for key, keywords in _MODEL_KEYWORDS:
+        if any(kw in tail for kw in keywords):
+            return key
+    return None
+```
+
+judge_prompt 마지막에 형식 명시 추가로 Gemini가 정해진 패턴을 출력하도록 유도:
+
+```
+마지막 줄에 반드시 아래 형식 중 하나를 그대로 출력하세요 (다른 문자 없이):
+최고모델: sop  /  최고모델: claude  /  최고모델: qwen  /  최고모델: qwen-q
+```
+
+#### `streaming.py` — import 정리
+
+`run_via_lg`, `sop_lg_stream`, `compare_stream` 내부에 분산돼 있던 `import re`, `import uuid`를 파일 상단으로 이동.
+
+#### MPS → CPU 자동 폴백
 
 `model.py`의 `cuda → mps → cpu` 폴백 덕분에 코드 수정 없이 Docker(Linux) 환경에서 CPU 모드로 자동 전환.
 

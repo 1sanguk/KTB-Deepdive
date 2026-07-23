@@ -27,9 +27,8 @@ class ChatResponse(BaseModel):
     used_rag: bool
 
 
-class AuthRequest(BaseModel):
+class _UserIdMixin(BaseModel):
     user_id: str
-    password: str
 
     @field_validator("user_id")
     @classmethod
@@ -37,6 +36,18 @@ class AuthRequest(BaseModel):
         return v.strip().lower()
 
 
+class AuthRequest(_UserIdMixin):
+    password: str
+
+
 class AuthResponse(BaseModel):
     ok: bool
     msg: str  # "registered" | "logged_in" | "wrong_password"
+
+
+class SessionCreateRequest(_UserIdMixin):
+    name: str = "새 채팅"
+
+
+class SessionRenameRequest(_UserIdMixin):
+    name: str

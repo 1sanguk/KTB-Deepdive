@@ -2,310 +2,1143 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8">
-  <title>SOP_GPT 한국어 챗봇</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <title>SOP AI — 비교 챗봇</title>
+  <link rel="stylesheet" href="/static/style.css?v=9">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-  <div class="app">
+<div class="app">
 
-    <!-- 로그인 화면 -->
-    <div id="login-view">
-      <div>
-        <h1>SOP_GPT 한국어 챗봇</h1>
-        <p style="color:#666; font-size:13px; margin-top:8px;">자동 라우팅 모드 — 질문에 맞는 모드를 자동으로 선택합니다.</p>
-      </div>
-
-      <div class="login-card">
-        <label for="user-id-input">사용자 ID</label>
-        <input id="user-id-input" placeholder="영문·숫자로 입력" autocomplete="off" autocorrect="off" spellcheck="false">
-        <label for="password-input">비밀번호</label>
-        <input id="password-input" type="password" placeholder="비밀번호 입력">
-        <button class="login-btn" id="login-btn" onclick="enterChat()">입장하기</button>
-        <span class="login-error" id="login-error">비밀번호가 일치하지 않습니다.</span>
-        <span class="login-hint">처음 사용하면 자동으로 계정이 생성됩니다.</span>
-      </div>
+  <!-- ── 로그인 화면 ────────────────────────────── -->
+  <div id="login-view">
+    <div>
+      <h1>SOP AI 비교 챗봇</h1>
+      <p class="subtitle">4개 모델 동시 답변 · Claude 자동 평가</p>
     </div>
-
-    <!-- 채팅 화면 (분할) -->
-    <div id="chat-view">
-      <div class="chat-header">
-        <button class="back-btn" onclick="goBack()">← 나가기</button>
-        <span id="chat-title">SOP GPT</span>
-        <span id="chat-user-id"></span>
-      </div>
-      <div class="split-container">
-        <div class="split-panel">
-          <div class="split-label sop">🤖 SOP_GPT</div>
-          <div class="messages" id="messages-sop"></div>
-        </div>
-        <div class="split-panel">
-          <div class="split-label claude">✨ Claude (Haiku)</div>
-          <div class="messages" id="messages-claude"></div>
-        </div>
-        <div class="split-panel">
-          <div class="split-label qwen">🟢 Qwen3-1.7B (BF16)</div>
-          <div class="messages" id="messages-qwen"></div>
-        </div>
-        <div class="split-panel">
-          <div class="split-label qwen-q">🟡 Qwen3-1.7B (Q4)</div>
-          <div class="messages" id="messages-qwen-q"></div>
-        </div>
-      </div>
-      <div class="input-area">
-        <input id="msg-input" placeholder="질문을 입력하세요" autocomplete="off">
-        <button id="send-btn" onclick="sendOrStop()">전송</button>
-      </div>
+    <div class="login-card">
+      <label for="user-id-input">사용자 ID</label>
+      <input id="user-id-input" placeholder="영문·숫자로 입력" autocomplete="off" autocorrect="off" spellcheck="false">
+      <label for="password-input">비밀번호</label>
+      <input id="password-input" type="password" placeholder="비밀번호 입력">
+      <button class="login-btn" id="login-btn">입장하기</button>
+      <span class="login-error" id="login-error"></span>
+      <span class="login-hint">처음 사용하면 자동으로 계정이 생성됩니다.</span>
     </div>
-
   </div>
 
-  <script>
-    let currentUserId = '';
-    let pendingCount = 0;
-    let abortController = null;
+  <!-- ── 메인 앱 ─────────────────────────────────── -->
+  <div id="main-view" style="display:none">
 
-    // 단기 메모리: userId → {sop, claude, qwen, qwenQ}
-    const sessionCache = new Map();
+    <!-- 왼쪽 사이드바: 세션 목록 -->
+    <nav id="sidebar">
+      <div class="sidebar-top">
+        <h2>SOP AI</h2>
+        <button id="new-chat-btn">＋ 새 채팅</button>
+      </div>
+      <ul id="session-list"></ul>
+      <div class="sidebar-bottom">
+        <div class="user-badge">
+          <span id="user-label"></span>
+          <button class="logout-btn" id="logout-btn">로그아웃</button>
+        </div>
+      </div>
+    </nav>
 
-    async function enterChat() {
-      const idInput  = document.getElementById('user-id-input');
-      const pwInput  = document.getElementById('password-input');
-      const errSpan  = document.getElementById('login-error');
-      const btn      = document.getElementById('login-btn');
+    <!-- 가운데: 채팅 영역 -->
+    <div id="chat-area">
+      <header id="chat-header">
+        <span id="chat-session-name">새 채팅</span>
+        <button id="session-export-btn" onclick="exportSessionMd()" title="대화 전체 내보내기">⬇ 대화</button>
+      </header>
+      <div id="chat-messages"></div>
+      <div id="input-area">
+        <textarea id="msg-input" placeholder="질문을 입력하세요..." rows="1"></textarea>
+        <button id="send-btn">전송</button>
+      </div>
+    </div>
 
-      const userId   = idInput.value.trim().toLowerCase();
-      const password = pwInput.value;
+    <!-- 오른쪽: 비교 패널 -->
+    <aside id="right-panel">
+      <div id="right-panel-header">비교 패널</div>
 
-      if (!userId || !password) {
-        errSpan.textContent = 'ID와 비밀번호를 모두 입력해주세요.';
-        errSpan.style.display = 'block';
-        return;
-      }
+      <div id="win-stats-bar">
+        <span class="win-label">선택횟수:</span>
+        <span class="win-stat" id="win-sop">SOP 0</span>
+        <span class="win-stat" id="win-claude">Claude 0</span>
+        <span class="win-stat" id="win-qwen">BF16 0</span>
+        <span class="win-stat" id="win-qwen-q">Q4 0</span>
+      </div>
 
-      btn.disabled = true;
-      btn.textContent = '확인 중...';
-      errSpan.style.display = 'none';
+      <div id="accordion-container">
+        <!-- SOP_GPT -->
+        <div class="accordion-row" id="acc-sop">
+          <div class="accordion-header" onclick="toggleAccordion('sop')">
+            <div class="acc-left">
+              <span class="acc-icon">🤖</span>
+              <span class="acc-name">SOP_GPT</span>
+            </div>
+            <div class="acc-right">
+              <span class="acc-status" id="status-sop">대기 중</span>
+              <button class="acc-copy-btn" onclick="copyAccBody('sop');event.stopPropagation();" title="복사">⎘</button>
+              <span class="acc-toggle">▾</span>
+            </div>
+          </div>
+          <div class="accordion-body" id="body-sop">
+            <p class="placeholder">질문을 보내면 답변이 표시됩니다.</p>
+          </div>
+          <div class="acc-resize-handle" data-key="sop"></div>
+        </div>
 
-      try {
-        const res  = await fetch('/auth/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: userId, password }),
+        <!-- Claude -->
+        <div class="accordion-row" id="acc-claude">
+          <div class="accordion-header" onclick="toggleAccordion('claude')">
+            <div class="acc-left">
+              <span class="acc-icon">✨</span>
+              <span class="acc-name">Claude (Haiku)</span>
+            </div>
+            <div class="acc-right">
+              <span class="acc-status" id="status-claude">대기 중</span>
+              <button class="acc-copy-btn" onclick="copyAccBody('claude');event.stopPropagation();" title="복사">⎘</button>
+              <span class="acc-toggle">▾</span>
+            </div>
+          </div>
+          <div class="accordion-body" id="body-claude">
+            <p class="placeholder">질문을 보내면 답변이 표시됩니다.</p>
+          </div>
+          <div class="acc-resize-handle" data-key="claude"></div>
+        </div>
+
+        <!-- Qwen BF16 -->
+        <div class="accordion-row" id="acc-qwen">
+          <div class="accordion-header" onclick="toggleAccordion('qwen')">
+            <div class="acc-left">
+              <span class="acc-icon">🟢</span>
+              <span class="acc-name">Qwen3-1.7B (BF16)</span>
+            </div>
+            <div class="acc-right">
+              <span class="acc-status" id="status-qwen">대기 중</span>
+              <button class="acc-copy-btn" onclick="copyAccBody('qwen');event.stopPropagation();" title="복사">⎘</button>
+              <span class="acc-toggle">▾</span>
+            </div>
+          </div>
+          <div class="accordion-body" id="body-qwen">
+            <p class="placeholder">질문을 보내면 답변이 표시됩니다.</p>
+          </div>
+          <div class="acc-resize-handle" data-key="qwen"></div>
+        </div>
+
+        <!-- Qwen Q4 -->
+        <div class="accordion-row" id="acc-qwen-q">
+          <div class="accordion-header" onclick="toggleAccordion('qwen-q')">
+            <div class="acc-left">
+              <span class="acc-icon">🟡</span>
+              <span class="acc-name">Qwen3-1.7B (Q4)</span>
+            </div>
+            <div class="acc-right">
+              <span class="acc-status" id="status-qwen-q">대기 중</span>
+              <button class="acc-copy-btn" onclick="copyAccBody('qwen-q');event.stopPropagation();" title="복사">⎘</button>
+              <span class="acc-toggle">▾</span>
+            </div>
+          </div>
+          <div class="accordion-body" id="body-qwen-q">
+            <p class="placeholder">질문을 보내면 답변이 표시됩니다.</p>
+          </div>
+          <div class="acc-resize-handle" data-key="qwen-q"></div>
+        </div>
+
+        <!-- Judge 이유 -->
+        <div class="accordion-row" id="acc-judge">
+          <div class="accordion-header" onclick="toggleAccordion('judge')">
+            <div class="acc-left">
+              <span class="acc-icon">⚖️</span>
+              <span class="acc-name">최선 답변 선택 이유</span>
+              <span id="status-judge" class="acc-status"></span>
+            </div>
+            <div class="acc-right">
+              <button class="acc-copy-btn" onclick="copyAccBody('judge');event.stopPropagation();" title="복사">⎘</button>
+              <span class="acc-toggle">▾</span>
+            </div>
+          </div>
+          <div class="accordion-body" id="body-judge">
+            <p class="placeholder">답변 완료 후 자동으로 평가됩니다.</p>
+          </div>
+          <div class="acc-resize-handle" data-key="judge"></div>
+        </div>
+      </div>
+
+      <!-- 세션 종합 평가 -->
+      <div class="summary-section" id="summary-section">
+        <div class="summary-resize-handle"></div>
+        <div class="summary-actions">
+          <button id="session-judge-btn" onclick="runSessionJudge()">📊 세션 종합 평가</button>
+          <button id="session-judge-dl-btn" onclick="downloadJudgeMd()" title=".md로 다운로드">⬇ .md</button>
+        </div>
+        <div id="session-judge-content"></div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────────
+let currentUser   = null;
+let sessions      = [];
+let currentSessId = null;
+let turns         = []; // [{question, models, bestModel, bestText, judgeText, modelTimes}]
+let selTurnIdx    = -1;
+let isStreaming   = false;
+let abortCtrl     = null;
+let streamStartTime  = 0;
+let judgeStartTime   = 0;
+let judgeTimerInterval = null;
+let modelDoneCount   = 0;
+
+marked.use({ breaks: true, gfm: true });
+const md = text => marked.parse(String(text || ''));
+
+const MODEL_KEYS  = ['sop', 'claude', 'qwen', 'qwen-q'];
+const MODEL_NAMES = {
+  'sop':    'SOP_GPT',
+  'claude': 'Claude (Haiku)',
+  'qwen':   'Qwen3-1.7B (BF16)',
+  'qwen-q': 'Qwen3-1.7B (Q4)',
+};
+
+// ── Login ──────────────────────────────────────────
+async function enterChat() {
+  const uid  = document.getElementById('user-id-input').value.trim().toLowerCase();
+  const pw   = document.getElementById('password-input').value;
+  const errEl = document.getElementById('login-error');
+
+  if (!uid || !pw) {
+    showErr(errEl, 'ID와 비밀번호를 모두 입력해주세요.');
+    return;
+  }
+
+  document.getElementById('login-btn').disabled = true;
+
+  try {
+    const res  = await fetch('/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: uid, password: pw}),
+    });
+    const data = await res.json();
+
+    if (!data.ok) {
+      showErr(errEl, '비밀번호가 일치하지 않습니다.');
+      return;
+    }
+
+    currentUser = uid;
+    errEl.classList.remove('show');
+    document.getElementById('login-view').style.display = 'none';
+    document.getElementById('main-view').style.display  = 'flex';
+    document.getElementById('user-label').textContent = uid;
+
+    await loadSessions();
+    if (sessions.length === 0) {
+      await createNewChat();
+    } else {
+      await loadSession(sessions[0].id);
+    }
+
+    if (data.msg === 'registered') {
+      setTimeout(openHelp, 400);
+    }
+  } catch (e) {
+    showErr(errEl, `연결 오류: ${e.message}`);
+  } finally {
+    document.getElementById('login-btn').disabled = false;
+  }
+}
+
+function showErr(el, msg) {
+  el.textContent = msg;
+  el.classList.add('show');
+}
+
+function logout() {
+  currentUser = null; sessions = []; currentSessId = null;
+  turns = []; selTurnIdx = -1; isStreaming = false;
+  document.getElementById('main-view').style.display  = 'none';
+  document.getElementById('login-view').style.display = 'flex';
+  document.getElementById('user-id-input').value = '';
+  document.getElementById('password-input').value = '';
+}
+
+// ── Sessions ───────────────────────────────────────
+async function loadSessions() {
+  const res  = await fetch(`/sessions?user_id=${encodeURIComponent(currentUser)}`);
+  const data = await res.json();
+  sessions   = data.sessions || [];
+  renderSessionList();
+}
+
+async function createNewChat() {
+  const res     = await fetch('/sessions', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_id: currentUser, name: '새 채팅'}),
+  });
+  const session = await res.json();
+  sessions.unshift(session);
+  renderSessionList();
+
+  currentSessId = session.id;
+  turns         = [];
+  selTurnIdx    = -1;
+
+  document.getElementById('chat-messages').innerHTML = '';
+  document.getElementById('chat-session-name').textContent = '새 채팅';
+  showGreeting();
+  resetRightPanel();
+  updateWinStats();
+  highlightSession(session.id);
+  document.getElementById('session-judge-content').classList.remove('visible');
+  document.getElementById('session-judge-content').textContent = '';
+}
+
+async function loadSession(sessionId) {
+  currentSessId = sessionId;
+
+  const sess = sessions.find(s => s.id === sessionId);
+  document.getElementById('chat-session-name').textContent = sess ? sess.name : sessionId;
+
+  const res  = await fetch(`/chat/compare/history?thread_id=${encodeURIComponent(sessionId)}`);
+  const data = await res.json();
+  const msgs = data.messages || [];
+
+  turns = [];
+  let i = 0;
+  while (i < msgs.length) {
+    if (msgs[i].role === 'user') {
+      const aMsg = msgs[i + 1];
+      if (aMsg && aMsg.role === 'assistant') {
+        turns.push({
+          question:   msgs[i].content,
+          models:     aMsg.models     || {},
+          bestModel:  aMsg.best_model || null,
+          bestText:   aMsg.content    || '',
+          judgeText:  '',
         });
-        const data = await res.json();
-
-        if (!data.ok) {
-          errSpan.textContent = '비밀번호가 일치하지 않습니다.';
-          errSpan.style.display = 'block';
-          btn.disabled = false;
-          btn.textContent = '입장하기';
-          return;
-        }
-
-        currentUserId = userId;
-        document.getElementById('chat-user-id').textContent = 'ID: ' + userId;
-        document.getElementById('login-view').style.display = 'none';
-        document.getElementById('chat-view').style.display = 'flex';
-        document.getElementById('chat-view').style.flexDirection = 'column';
-
-        const cached = sessionCache.get(userId);
-        if (cached) {
-          document.getElementById('messages-sop').innerHTML    = cached.sop;
-          document.getElementById('messages-claude').innerHTML = cached.claude;
-          document.getElementById('messages-qwen').innerHTML   = cached.qwen;
-          document.getElementById('messages-qwen-q').innerHTML = cached.qwenQ;
-        } else {
-          document.getElementById('messages-sop').innerHTML    = '';
-          document.getElementById('messages-claude').innerHTML = '';
-          document.getElementById('messages-qwen').innerHTML   = '';
-          document.getElementById('messages-qwen-q').innerHTML = '';
-          await loadHistory(userId);
-        }
-
-        document.getElementById('msg-input').focus();
-      } catch (_) {
-        errSpan.textContent = '서버 연결에 실패했습니다.';
-        errSpan.style.display = 'block';
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '입장하기';
+        i += 2;
+        continue;
       }
     }
+    i++;
+  }
 
-    function goBack() {
-      if (currentUserId) {
-        sessionCache.set(currentUserId, {
-          sop:    document.getElementById('messages-sop').innerHTML,
-          claude: document.getElementById('messages-claude').innerHTML,
-          qwen:   document.getElementById('messages-qwen').innerHTML,
-          qwenQ:  document.getElementById('messages-qwen-q').innerHTML,
-        });
+  renderChat();
+  updateWinStats();
+  if (turns.length > 0) {
+    selectTurn(turns.length - 1);
+  } else {
+    selTurnIdx = -1;
+    resetRightPanel();
+  }
+
+  document.getElementById('session-judge-content').classList.remove('visible');
+  document.getElementById('session-judge-content').textContent = '';
+  highlightSession(sessionId);
+}
+
+function renderSessionList() {
+  const list = document.getElementById('session-list');
+  list.innerHTML = '';
+  sessions.forEach(sess => {
+    const li       = document.createElement('li');
+    li.className   = 'session-item' + (sess.id === currentSessId ? ' active' : '');
+    li.dataset.id  = sess.id;
+    li.onclick     = () => loadSession(sess.id);
+
+    const span     = document.createElement('span');
+    span.className = 'session-name';
+    span.textContent = sess.name || '새 채팅';
+
+    const btn      = document.createElement('button');
+    btn.className  = 'session-rename-btn';
+    btn.textContent = '✏';
+    btn.title      = '이름 변경';
+    btn.onclick    = e => {
+      e.stopPropagation();
+      btn.style.display = 'none';
+      startEditName(sess.id, span);
+    };
+
+    li.appendChild(span);
+    li.appendChild(btn);
+    list.appendChild(li);
+  });
+}
+
+function highlightSession(id) {
+  document.querySelectorAll('.session-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.id === id)
+  );
+}
+
+function startEditName(sessId, span) {
+  const input   = document.createElement('input');
+  input.className = 'session-name-edit';
+  input.value   = span.textContent;
+  input.onclick = e => e.stopPropagation();
+
+  const save = async () => {
+    const newName = input.value.trim();
+    if (newName && newName !== span.textContent) {
+      await fetch(`/sessions/${sessId}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({user_id: currentUser, name: newName}),
+      });
+      const s = sessions.find(x => x.id === sessId);
+      if (s) s.name = newName;
+      if (sessId === currentSessId)
+        document.getElementById('chat-session-name').textContent = newName;
+    }
+    renderSessionList();
+  };
+
+  input.onblur   = save;
+  input.onkeydown = e => {
+    if (e.key === 'Enter')  input.blur();
+    if (e.key === 'Escape') renderSessionList();
+  };
+  span.replaceWith(input);
+  input.focus(); input.select();
+}
+
+// ── Chat Rendering ─────────────────────────────────
+function showGreeting() {
+  const container = document.getElementById('chat-messages');
+  const el = document.createElement('div');
+  el.className = 'msg-bot greeting';
+  el.innerHTML = `
+    <div class="model-badge claude">SOP AI</div>
+    안녕하세요! 🎮 RPG 관련 정보를 최대한 알려드리는 <strong>SOP AI</strong>입니다.<br>
+    4가지 AI 모델이 동시에 답변하고, Claude가 가장 잘된 답변을 선별해드립니다.<br>
+    무엇이든 궁금한 점을 물어보세요!
+  `;
+  container.appendChild(el);
+}
+
+function renderChat() {
+  const container = document.getElementById('chat-messages');
+  container.innerHTML = '';
+  showGreeting();
+  turns.forEach((turn, idx) => appendTurnDOM(turn, idx));
+  scrollBottom();
+}
+
+function appendTurnDOM(turn, idx) {
+  const container = document.getElementById('chat-messages');
+
+  // User message
+  const uEl = document.createElement('div');
+  uEl.className = 'msg-user';
+  uEl.textContent = turn.question;
+  uEl.onclick = () => selectTurn(idx);
+  container.appendChild(uEl);
+
+  // Bot message (best answer)
+  const bEl = document.createElement('div');
+  bEl.className = 'msg-bot' + (idx === selTurnIdx ? ' selected' : '');
+  bEl.dataset.turn = idx;
+  bEl.onclick = () => selectTurn(idx);
+  setBotContent(bEl, turn);
+  container.appendChild(bEl);
+}
+
+function setBotContent(el, turn) {
+  const badgeClass = turn.bestModel ? ` ${turn.bestModel}` : '';
+  const badgeName  = turn.bestModel ? MODEL_NAMES[turn.bestModel] || turn.bestModel : 'AI';
+  const badge = `<span class="model-badge${badgeClass}">${badgeName}</span>`;
+  const body  = turn.bestText
+    ? `<div class="answer-text">${md(turn.bestText)}</div>`
+    : `<div class="thinking">⏳ 모델들이 답변 중...</div>`;
+  el.innerHTML = badge + body;
+}
+
+function selectTurn(idx) {
+  selTurnIdx = idx;
+  document.querySelectorAll('.msg-bot[data-turn]').forEach(el =>
+    el.classList.toggle('selected', parseInt(el.dataset.turn) === idx)
+  );
+  renderRightPanel(idx);
+}
+
+// ── Right Panel ────────────────────────────────────
+function renderRightPanel(idx) {
+  if (idx < 0 || idx >= turns.length) { resetRightPanel(); return; }
+  const turn = turns[idx];
+  const q    = turn.question || '';
+  document.getElementById('right-panel-header').textContent =
+    `비교 패널 — ${q.length > 28 ? q.slice(0, 28) + '…' : q}`;
+
+  MODEL_KEYS.forEach(key => {
+    const body   = document.getElementById(`body-${key}`);
+    const status = document.getElementById(`status-${key}`);
+    if (!body || !status) return;
+    const ans = turn.models[key];
+    const time = turn.modelTimes && turn.modelTimes[key] ? ` · ${turn.modelTimes[key]}s` : '';
+    if (!ans) {
+      body.innerHTML = `<p class="placeholder">답변 없음</p>`;
+      status.textContent = ''; status.className = 'acc-status';
+    } else if (ans === '[모델 없음]') {
+      body.innerHTML = `<p class="placeholder">[모델 없음]</p>`;
+      status.textContent = '미사용'; status.className = 'acc-status unavail';
+    } else {
+      body.innerHTML = `<div class="answer-text">${md(ans)}</div>`;
+      const isBest = key === turn.bestModel;
+      status.textContent = (isBest ? '✓ 최선' : '완료') + time;
+      status.className   = 'acc-status ' + (isBest ? 'best' : 'done');
+    }
+  });
+
+  const jBody = document.getElementById('body-judge');
+  if (turn.judgeText) {
+    jBody.innerHTML = `<div class="answer-text">${md(turn.judgeText)}</div>`;
+  } else {
+    jBody.innerHTML = `<p class="placeholder">답변 완료 후 자동으로 평가됩니다.</p>`;
+  }
+}
+
+function resetRightPanel() {
+  document.getElementById('right-panel-header').textContent = '비교 패널';
+  MODEL_KEYS.forEach(key => {
+    const b = document.getElementById(`body-${key}`);
+    const s = document.getElementById(`status-${key}`);
+    if (b) b.innerHTML = `<p class="placeholder">질문을 보내면 답변이 표시됩니다.</p>`;
+    if (s) { s.textContent = '대기 중'; s.className = 'acc-status'; }
+  });
+  const jb = document.getElementById('body-judge');
+  if (jb) jb.innerHTML = `<p class="placeholder">답변 완료 후 자동으로 평가됩니다.</p>`;
+}
+
+function toggleAccordion(key) {
+  const row = document.getElementById(`acc-${key}`);
+  if (row) row.classList.toggle('open');
+}
+
+// ── Send Message ───────────────────────────────────
+async function sendMessage() {
+  if (isStreaming) { abortCtrl?.abort(); return; }
+
+  const input    = document.getElementById('msg-input');
+  const question = input.value.trim();
+  if (!question || !currentSessId) return;
+
+  input.value = ''; input.style.height = 'auto';
+  isStreaming  = true;
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.textContent = '중지';
+  sendBtn.classList.add('stop');
+
+  streamStartTime = Date.now();
+  modelDoneCount  = 0;
+  judgeStartTime  = 0;
+  clearInterval(judgeTimerInterval);
+  judgeTimerInterval = null;
+  const sj = document.getElementById('status-judge');
+  if (sj) { sj.textContent = ''; sj.className = 'acc-status'; }
+  const turnIdx = turns.length;
+  turns.push({question, models: {}, bestModel: null, bestText: '', judgeText: '', modelTimes: {}});
+
+  const container = document.getElementById('chat-messages');
+
+  // User bubble
+  const uEl = document.createElement('div');
+  uEl.className   = 'msg-user';
+  uEl.textContent = question;
+  uEl.onclick     = () => selectTurn(turnIdx);
+  container.appendChild(uEl);
+
+  // Bot placeholder
+  const bEl = document.createElement('div');
+  bEl.className   = 'msg-bot selected';
+  bEl.dataset.turn = turnIdx;
+  bEl.innerHTML   = `<div class="thinking">⏳ 모델들이 답변 중...</div>`;
+  bEl.onclick     = () => selectTurn(turnIdx);
+  container.appendChild(bEl);
+  scrollBottom();
+
+  selTurnIdx = turnIdx;
+  // Deselect others
+  document.querySelectorAll('.msg-bot[data-turn]').forEach(el =>
+    el.classList.toggle('selected', parseInt(el.dataset.turn) === turnIdx)
+  );
+
+  // Update right panel header
+  document.getElementById('right-panel-header').textContent =
+    `비교 패널 — ${question.length > 28 ? question.slice(0, 28) + '…' : question}`;
+
+  // Reset accordion content (open/closed 상태는 유지)
+  MODEL_KEYS.forEach(key => {
+    const b = document.getElementById(`body-${key}`);
+    const s = document.getElementById(`status-${key}`);
+    if (b) b.innerHTML = `<div class="thinking">⏳ 생성 중...</div>`;
+    if (s) { s.textContent = '생성 중...'; s.className = 'acc-status streaming'; }
+  });
+  const jb  = document.getElementById('body-judge');
+  if (jb) jb.innerHTML = `<p class="placeholder">모든 답변 완료 후 평가됩니다...</p>`;
+
+  // Auto-name session from first message
+  const sess = sessions.find(s => s.id === currentSessId);
+  if (sess && (sess.name === '새 채팅' || !sess.name)) {
+    const newName = question.slice(0, 40);
+    sess.name = newName;
+    document.getElementById('chat-session-name').textContent = newName;
+    renderSessionList();
+    fetch(`/sessions/${currentSessId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({user_id: currentUser, name: newName}),
+    }).catch(() => {});
+  }
+
+  // Stream
+  abortCtrl = new AbortController();
+  try {
+    const res    = await fetch('/chat/compare/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question, thread_id: currentSessId}),
+      signal: abortCtrl.signal,
+    });
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        handleSSE(evt, turnIdx, bEl);
       }
-      document.getElementById('login-view').style.display = 'flex';
-      document.getElementById('chat-view').style.display  = 'none';
     }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      bEl.innerHTML = `<div class="answer-text">[오류] 스트리밍 실패: ${esc(e.message)}</div>`;
+    }
+  }
 
-    async function loadHistory(userId) {
-      try {
-        const [sopData, claudeData, qwenData, qwenQData] = await Promise.all([
-          fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId)}`).then(r => r.json()),
-          fetch(`/chat/claude/auto/history?thread_id=${encodeURIComponent(userId)}`).then(r => r.json()),
-          fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId + ':bf16')}`).then(r => r.json()),
-          fetch(`/chat/auto/history?thread_id=${encodeURIComponent(userId + ':q4')}`).then(r => r.json()),
-        ]);
-        for (const msg of (sopData.messages || [])) {
-          addMsg('messages-sop', msg.role === 'user' ? 'user' : 'assistant history', msg.content);
+  isStreaming = false;
+  sendBtn.textContent = '전송';
+  sendBtn.classList.remove('stop');
+}
+
+function handleSSE(evt, turnIdx, bEl) {
+  const turn         = turns[turnIdx];
+  const isSelected   = selTurnIdx === turnIdx;
+
+  if (evt.type === 'model_text') {
+    turn.models[evt.model] = evt.text;
+    if (isSelected) {
+      const b = document.getElementById(`body-${evt.model}`);
+      if (b) b.innerHTML = `<div class="answer-text">${md(evt.text)}</div>`;
+    }
+  }
+  else if (evt.type === 'model_done') {
+    const elapsed = ((Date.now() - streamStartTime) / 1000).toFixed(1);
+    turn.modelTimes[evt.model] = elapsed;
+    if (isSelected) {
+      const s = document.getElementById(`status-${evt.model}`);
+      if (s) { s.textContent = `완료 · ${elapsed}s`; s.className = 'acc-status done'; }
+    }
+    modelDoneCount++;
+    if (modelDoneCount === 4) {
+      judgeStartTime = Date.now();
+      const sj = document.getElementById('status-judge');
+      if (sj) { sj.textContent = '평가 중... 0s'; sj.className = 'acc-status streaming'; }
+      judgeTimerInterval = setInterval(() => {
+        const sec = ((Date.now() - judgeStartTime) / 1000).toFixed(1);
+        const sj2 = document.getElementById('status-judge');
+        if (sj2 && sj2.className.includes('streaming')) sj2.textContent = `평가 중... ${sec}s`;
+      }, 100);
+    }
+  }
+  else if (evt.type === 'judge_text') {
+    clearInterval(judgeTimerInterval);
+    judgeTimerInterval = null;
+    turn.judgeText = evt.text;
+    if (isSelected) {
+      const jb = document.getElementById('body-judge');
+      if (jb) jb.innerHTML = `<div class="answer-text">${md(evt.text)}</div>`;
+      const elapsed = judgeStartTime ? ((Date.now() - judgeStartTime) / 1000).toFixed(1) : '?';
+      const sj = document.getElementById('status-judge');
+      if (sj) { sj.textContent = `선택 중... ${elapsed}s`; sj.className = 'acc-status streaming'; }
+    }
+  }
+  else if (evt.type === 'judge_done') {
+    clearInterval(judgeTimerInterval);
+    judgeTimerInterval = null;
+    const judgeElapsed = judgeStartTime ? ((Date.now() - judgeStartTime) / 1000).toFixed(1) : '?';
+    turn.bestModel = evt.best_model;
+    turn.bestText  = evt.best_text || turn.models[evt.best_model] || '';
+    setBotContent(bEl, turn);
+    if (isSelected) {
+      MODEL_KEYS.forEach(key => {
+        const s = document.getElementById(`status-${key}`);
+        if (s) {
+          const t = turn.modelTimes[key] ? ` · ${turn.modelTimes[key]}s` : '';
+          s.textContent = (key === evt.best_model ? '✓ 최선' : '완료') + t;
+          s.className   = 'acc-status ' + (key === evt.best_model ? 'best' : 'done');
         }
-        for (const msg of (claudeData.messages || [])) {
-          addMsg('messages-claude', msg.role === 'user' ? 'user' : 'assistant claude-msg history', msg.content);
+      });
+      const sj = document.getElementById('status-judge');
+      if (evt.judge_error) {
+        if (sj) { sj.textContent = `⚠️ 오류 · ${judgeElapsed}s`; sj.className = 'acc-status error'; }
+        const jb = document.getElementById('body-judge');
+        if (jb) {
+          const fallbackName = evt.judge_fallback_model || evt.best_model;
+          jb.innerHTML = `<div class="answer-text judge-error-box">
+            <p><strong>⚠️ 판별 실패: ${evt.judge_error}</strong></p>
+            <p>자동으로 답변 길이 기준으로 가장 적합한 모델을 선택했습니다.</p>
+            <p>추천 모델: <strong>${fallbackName}</strong></p>
+          </div>`;
         }
-        for (const msg of (qwenData.messages || [])) {
-          addMsg('messages-qwen', msg.role === 'user' ? 'user' : 'assistant qwen-msg history', msg.content);
-        }
-        for (const msg of (qwenQData.messages || [])) {
-          addMsg('messages-qwen-q', msg.role === 'user' ? 'user' : 'assistant qwen-q-msg history', msg.content);
-        }
-      } catch (_) {}
-    }
-
-    function addMsg(containerId, cls, text) {
-      const box = document.getElementById(containerId);
-      const div = document.createElement('div');
-      div.className = 'msg ' + cls;
-      div.textContent = text;
-      box.appendChild(div);
-      box.scrollTop = box.scrollHeight;
-      return div;
-    }
-
-    function addRouteBadge(containerId, label) {
-      const box = document.getElementById(containerId);
-      const div = document.createElement('div');
-      div.className = 'route-badge';
-      div.textContent = '→ ' + label;
-      box.appendChild(div);
-      box.scrollTop = box.scrollHeight;
-    }
-
-    function addLabel(containerId, text) {
-      const box = document.getElementById(containerId);
-      const div = document.createElement('div');
-      div.className = 'rag-label';
-      div.textContent = text;
-      box.appendChild(div);
-      box.scrollTop = box.scrollHeight;
-    }
-
-    function sendOrStop() {
-      if (pendingCount > 0) {
-        if (abortController) abortController.abort();
       } else {
-        send();
+        if (sj) { sj.textContent = `완료 · ${judgeElapsed}s`; sj.className = 'acc-status done'; }
       }
     }
+    updateWinStats();
+    scrollBottom();
+  }
+}
 
-    async function send() {
-      const input    = document.getElementById('msg-input');
-      const btn      = document.getElementById('send-btn');
-      const question = input.value.trim();
-      if (!question || !currentUserId) return;
+// ── Session Judge ──────────────────────────────────
+async function runSessionJudge() {
+  if (!currentSessId) return;
+  const btn     = document.getElementById('session-judge-btn');
+  const content = document.getElementById('session-judge-content');
+  btn.disabled  = true;
+  btn.textContent = '⏳ 평가 중...';
+  content.textContent = '';
+  content.classList.add('visible');
 
-      addMsg('messages-sop',    'user', question);
-      addMsg('messages-claude', 'user', question);
-      addMsg('messages-qwen',   'user', question);
-      addMsg('messages-qwen-q', 'user', question);
-      input.value = '';
-      btn.textContent = '정지';
-      btn.classList.add('stopping');
-      pendingCount = 4;
+  try {
+    const res    = await fetch('/chat/compare/judge/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: '', thread_id: currentSessId}),
+    });
+    const reader  = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
 
-      abortController = new AbortController();
-      const signal = abortController.signal;
-
-      streamPanelWith('/chat/auto/stream',        question, 'messages-sop',    'assistant',            signal);
-      streamPanelWith('/chat/claude/auto/stream', question, 'messages-claude', 'assistant claude-msg', signal);
-      streamPanelWith('/chat/langgraph/stream',   question, 'messages-qwen',   'assistant qwen-msg',   signal, 'qwen');
-      streamPanelWith('/chat/langgraph/stream',   question, 'messages-qwen-q', 'assistant qwen-q-msg', signal, 'qwen-q');
-    }
-
-    async function streamPanelWith(endpoint, question, containerId, msgClass, signal, model = null) {
-      const box = document.getElementById(containerId);
-      const statusDiv = addMsg(containerId, 'assistant loading', '분류 중…');
-      let answerDiv = null;
-      let routeLabel = null;
-
-      try {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, thread_id: currentUserId || null, ...(model && { model }) }),
-          signal,
-        });
-
-        const reader  = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const parts = buf.split('\n\n');
-          buf = parts.pop();
-          for (const part of parts) {
-            if (!part.startsWith('data: ')) continue;
-            const evt = JSON.parse(part.slice(6));
-
-            if (evt.type === 'mode') {
-              routeLabel = evt.label;
-              statusDiv.textContent = '[' + evt.label + '] 생성 중…';
-              box.scrollTop = box.scrollHeight;
-            } else if (evt.type === 'status') {
-              statusDiv.textContent = evt.text;
-              box.scrollTop = box.scrollHeight;
-            } else if (evt.type === 'text') {
-              statusDiv.textContent = evt.text || '(빈 응답)';
-              statusDiv.className = 'msg ' + msgClass;
-              box.scrollTop = box.scrollHeight;
-            } else if (evt.type === 'text_fallback') {
-              if (answerDiv === null) {
-                answerDiv = addMsg(containerId, msgClass, '');
-              }
-              answerDiv.textContent = evt.text || '(빈 응답)';
-              box.scrollTop = box.scrollHeight;
-            } else if (evt.type === 'rag_context') {
-              addLabel(containerId, '참고: ' + evt.text);
-            }
-          }
-        }
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          statusDiv.textContent = '중단됨';
-        } else {
-          statusDiv.textContent = '오류가 발생했습니다.';
-          statusDiv.className = 'msg ' + msgClass;
-        }
-      } finally {
-        if (routeLabel) addRouteBadge(containerId, routeLabel);
-        pendingCount--;
-        if (pendingCount === 0) {
-          const btn = document.getElementById('send-btn');
-          btn.textContent = '전송';
-          btn.classList.remove('stopping');
-          document.getElementById('msg-input').focus();
-        }
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      const lines = buf.split('\n\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        if (evt.type === 'judge_text') content.innerHTML = md(evt.text);
       }
     }
+  } catch (e) {
+    content.textContent = `[오류] ${e.message}`;
+  }
 
-    document.getElementById('msg-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) send();
+  btn.disabled    = false;
+  btn.textContent = '📊 세션 종합 평가';
+}
+
+// ── Win Stats ──────────────────────────────────────
+function updateWinStats() {
+  const counts = {sop: 0, claude: 0, qwen: 0, 'qwen-q': 0};
+  turns.forEach(t => { if (t.bestModel) counts[t.bestModel] = (counts[t.bestModel] || 0) + 1; });
+  const max = Math.max(...Object.values(counts));
+  const labels = {sop: 'SOP', claude: 'Claude', qwen: 'BF16', 'qwen-q': 'Q4'};
+  ['sop', 'claude', 'qwen', 'qwen-q'].forEach(key => {
+    const el = document.getElementById(`win-${key}`);
+    if (el) {
+      el.textContent = `${labels[key]} ${counts[key]}`;
+      el.className = 'win-stat' + (counts[key] === max && max > 0 ? ' leader' : '');
+    }
+  });
+}
+
+// ── Copy ───────────────────────────────────────────
+async function copyAccBody(key) {
+  const body = document.getElementById(`body-${key}`);
+  if (!body) return;
+  const text = body.innerText.trim();
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = body.closest('.accordion-row').querySelector('.acc-copy-btn');
+    if (btn) { btn.textContent = '✓'; setTimeout(() => { btn.textContent = '⎘'; }, 1200); }
+  } catch {}
+}
+
+// ── Export Session ──────────────────────────────────
+function exportSessionMd() {
+  if (!turns.length) return;
+  const sessName = document.getElementById('chat-session-name').textContent || 'session';
+  const date = new Date().toLocaleDateString('ko-KR');
+  let text = `# ${sessName}\n*${date}*\n\n`;
+  turns.forEach((turn, i) => {
+    text += `---\n\n## Q${i + 1}: ${turn.question}\n\n`;
+    if (turn.bestModel) {
+      text += `**🏆 최선 (${MODEL_NAMES[turn.bestModel]}):**\n\n${turn.bestText}\n\n`;
+    }
+    text += `### 전체 모델 답변\n\n`;
+    MODEL_KEYS.forEach(key => {
+      const ans = turn.models[key];
+      if (ans && ans !== '[모델 없음]') text += `**${MODEL_NAMES[key]}:**\n\n${ans}\n\n`;
     });
-    document.getElementById('password-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') enterChat();
-    });
-    document.getElementById('user-id-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') document.getElementById('password-input').focus();
-    });
-  </script>
+  });
+  const blob = new Blob([text], { type: 'text/markdown; charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${sessName.replace(/[^\w가-힣\-]/g, '_')}_대화.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Resize ─────────────────────────────────────────
+function initAccordionResize(key) {
+  const handle = document.querySelector(`.acc-resize-handle[data-key="${key}"]`);
+  if (!handle) return;
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const body = document.getElementById(`body-${key}`);
+    const startY = e.clientY;
+    const startH = body.getBoundingClientRect().height;
+    const onMove = ev => {
+      const h = Math.max(60, startH + ev.clientY - startY);
+      body.style.maxHeight = h + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+function initSummaryResize() {
+  const handle = document.querySelector('.summary-resize-handle');
+  if (!handle) return;
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const section = document.querySelector('.summary-section');
+    const startY  = e.clientY;
+    const startH  = section.getBoundingClientRect().height;
+    const onMove  = ev => {
+      const h = Math.max(80, startH + (startY - ev.clientY));
+      section.style.flex    = `0 0 ${h}px`;
+      section.style.overflowY = 'auto';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+function downloadJudgeMd() {
+  const content = document.getElementById('session-judge-content').textContent.trim();
+  if (!content) return;
+  const sessName = document.getElementById('chat-session-name').textContent || 'session';
+  const md   = `# 세션 종합 평가\n\n**세션:** ${sessName}\n\n${content}\n`;
+  const blob  = new Blob([md], { type: 'text/markdown; charset=utf-8' });
+  const url   = URL.createObjectURL(blob);
+  const a     = document.createElement('a');
+  a.href      = url;
+  a.download  = `${sessName.replace(/[^\w가-힣\-]/g, '_')}_평가.md`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── Utils ──────────────────────────────────────────
+function esc(t) {
+  return String(t)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+}
+
+function scrollBottom() {
+  const c = document.getElementById('chat-messages');
+  c.scrollTop = c.scrollHeight;
+}
+
+// ── Event bindings ─────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('user-id-input').focus();
+
+  document.getElementById('login-btn').onclick   = enterChat;
+  document.getElementById('logout-btn').onclick  = logout;
+  document.getElementById('new-chat-btn').onclick = createNewChat;
+  document.getElementById('send-btn').onclick    = sendMessage;
+
+  ['sop', 'claude', 'qwen', 'qwen-q', 'judge'].forEach(initAccordionResize);
+  initSummaryResize();
+
+  const pwInput = document.getElementById('password-input');
+  pwInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') enterChat();
+  });
+
+  const msgInput = document.getElementById('msg-input');
+  msgInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  msgInput.addEventListener('input', () => {
+    msgInput.style.height = 'auto';
+    msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+  });
+});
+</script>
+
+<!-- ── 도움말 투어 ────────────────────────────────── -->
+<!-- SVG: 구멍 뚫린 dim 레이어 -->
+<svg id="help-svg" style="display:none;position:fixed;inset:0;z-index:9000;width:100vw;height:100vh;" xmlns="http://www.w3.org/2000/svg"></svg>
+
+<!-- 말풍선 툴팁 -->
+<div id="help-tooltip" style="display:none;">
+  <div id="help-tip-arrow"></div>
+  <button class="help-close-btn" onclick="closeHelp()">✕</button>
+  <div class="help-progress" id="help-progress"></div>
+  <div class="help-tip-content" id="help-tip-content"></div>
+  <div class="help-footer">
+    <button class="help-skip-btn" onclick="closeHelp()">스킵</button>
+    <div class="help-nav">
+      <button class="help-prev-btn" id="help-prev" onclick="helpStep(-1)">◀ 이전</button>
+      <button class="help-next-btn" id="help-next" onclick="helpStep(1)">다음 ▶</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── 도움말 ─────────────────────────────────────────
+const HELP_STEPS = [
+  {
+    icon: '✏️',
+    title: '질문 입력하기',
+    desc: '화면 하단 입력창에 질문을 입력하고 <strong>전송</strong> 버튼을 누르거나 <strong>Enter</strong>를 눌러 보내세요.',
+    highlight: 'input-area',
+  },
+  {
+    icon: '📋',
+    title: '답변 확인하기',
+    desc: '질문을 보내면 오른쪽 패널에서 4개 AI 모델이 <strong>동시에</strong> 답변을 생성합니다. 각 항목을 클릭하면 펼쳐집니다.',
+    highlight: 'accordion-container',
+    anchorTop: true,
+  },
+  {
+    icon: '🤖',
+    title: '4가지 모델 소개',
+    desc: '<ul><li><strong>SOP_GPT</strong> — 직접 학습한 한국어 경량 모델</li><li><strong>Claude (Haiku)</strong> — Anthropic의 빠른 상용 모델</li><li><strong>Qwen3-1.7B BF16</strong> — 고정밀 오픈소스 모델</li><li><strong>Qwen3-1.7B Q4</strong> — 양자화로 속도를 높인 버전</li></ul>',
+    highlight: 'accordion-container',
+    anchorTop: true,
+  },
+  {
+    icon: '⚖️',
+    title: '최선 답변 자동 선택',
+    desc: '모든 모델이 완료되면 Gemini가 4개 답변 중 가장 좋은 답을 골라 <strong>이유</strong>를 설명합니다. 가운데 채팅창에는 최선 답변이 표시됩니다.',
+    highlight: 'acc-judge',
+  },
+  {
+    icon: '📊',
+    title: '세션 종합 평가 & 평가 다운로드',
+    desc: '<strong>📊 세션 종합 평가</strong> 버튼을 누르면 이번 세션 전체의 모델별 성능을 Gemini가 분석합니다. <strong>⬇ .md</strong> 버튼으로 분석 결과를 마크다운 파일로 저장할 수 있어요.',
+    highlight: 'summary-section',
+  },
+  {
+    icon: '🏆',
+    title: '선택 횟수',
+    desc: '오른쪽 상단 <strong>선택횟수</strong>는 이번 세션에서 Gemini가 각 모델을 몇 번 "최선"으로 뽑았는지 보여주는 집계입니다.',
+    highlight: 'win-stats-bar',
+  },
+  {
+    icon: '💬',
+    title: '스레드 관리 & 로그아웃',
+    desc: '왼쪽 사이드바에서 <strong>＋ 새 채팅</strong>으로 새 대화를 시작하거나, 저장된 이전 대화를 클릭해 불러올 수 있습니다. 하단 <strong>로그아웃</strong>으로 세션을 종료하세요.',
+    highlight: 'sidebar',
+    anchorTop: true,
+  },
+  {
+    icon: '⬇️',
+    title: '대화 다운로드',
+    desc: '상단 <strong>⬇ 대화</strong> 버튼을 누르면 현재 세션의 모든 대화 내용을 마크다운 파일로 다운로드할 수 있습니다.',
+    highlight: 'session-export-btn',
+  },
+];
+
+const HELP_TIP_W  = 300;
+const HELP_PAD    = 12;   // 화면 가장자리 여백
+const HELP_GAP    = 14;   // 대상 요소와 툴팁 사이 간격
+const HELP_ARR_SZ = 12;   // 화살표 크기
+const HELP_SPT_PAD = 10;  // 스포트라이트 패딩
+
+let helpCurrent = 0;
+let helpActive  = false;
+
+function openHelp() {
+  helpCurrent = 0;
+  helpActive  = true;
+  document.getElementById('help-svg').style.display     = 'block';
+  document.getElementById('help-tooltip').style.display = 'block';
+  renderHelp();
+}
+
+function closeHelp() {
+  helpActive = false;
+  document.getElementById('help-svg').style.display     = 'none';
+  document.getElementById('help-tooltip').style.display = 'none';
+}
+
+function helpStep(dir) {
+  helpCurrent = Math.max(0, Math.min(HELP_STEPS.length - 1, helpCurrent + dir));
+  renderHelp();
+}
+
+function _helpSpotlightPath(rect) {
+  const W = window.innerWidth, H = window.innerHeight;
+  const P = HELP_SPT_PAD, R = 8;
+  const x = Math.max(0, rect.left - P),  y = Math.max(0, rect.top - P);
+  const w = Math.min(rect.width + P*2, W - x), h = Math.min(rect.height + P*2, H - y);
+  // evenodd: 외부 사각형에서 내부 둥근사각형을 도려냄
+  return `M0,0 H${W} V${H} H0 Z ` +
+    `M${x+R},${y} H${x+w-R} Q${x+w},${y} ${x+w},${y+R} ` +
+    `V${y+h-R} Q${x+w},${y+h} ${x+w-R},${y+h} ` +
+    `H${x+R} Q${x},${y+h} ${x},${y+h-R} V${y+R} Q${x},${y} ${x+R},${y} Z`;
+}
+
+function _updateSVG(rect) {
+  const svg = document.getElementById('help-svg');
+  const W = window.innerWidth, H = window.innerHeight;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  if (!rect) {
+    svg.innerHTML = `<rect width="${W}" height="${H}" fill="rgba(0,0,0,0.65)"/>`;
+    return;
+  }
+  svg.innerHTML = `<path fill-rule="evenodd" fill="rgba(0,0,0,0.65)" d="${_helpSpotlightPath(rect)}"/>`;
+}
+
+function _positionTooltip(rect) {
+  const tip  = document.getElementById('help-tooltip');
+  const arr  = document.getElementById('help-tip-arrow');
+  const VW   = window.innerWidth, VH = window.innerHeight;
+
+  tip.style.width = HELP_TIP_W + 'px';
+  // 높이 측정을 위해 화면 밖에 잠깐 렌더
+  tip.style.top = '-9999px'; tip.style.left = '-9999px'; tip.style.visibility = 'hidden';
+  const TH = tip.offsetHeight;
+  tip.style.visibility = 'visible';
+
+  let top, left, placement;
+  const cx = rect.left + rect.width  / 2;
+  const cy = rect.top  + rect.height / 2;
+
+  // 아래 → 위 → 오른쪽 → 왼쪽 순으로 공간 확인
+  if (rect.bottom + HELP_GAP + HELP_ARR_SZ + TH <= VH - HELP_PAD) {
+    placement = 'bottom';
+    top = rect.bottom + HELP_GAP + HELP_ARR_SZ;
+  } else if (rect.top - HELP_GAP - HELP_ARR_SZ - TH >= HELP_PAD) {
+    placement = 'top';
+    top = rect.top - HELP_GAP - HELP_ARR_SZ - TH;
+  } else {
+    // fallback: 아래 공간에 클램프
+    placement = 'bottom';
+    top = Math.max(HELP_PAD, VH - TH - HELP_PAD);
+  }
+
+  left = Math.max(HELP_PAD, Math.min(VW - HELP_TIP_W - HELP_PAD, cx - HELP_TIP_W / 2));
+  tip.style.top  = top  + 'px';
+  tip.style.left = left + 'px';
+
+  // 화살표 수평 위치 (툴팁 내부 기준)
+  const arrCenter = Math.max(20, Math.min(HELP_TIP_W - 20, cx - left));
+  arr.style.left   = (arrCenter - HELP_ARR_SZ) + 'px';
+  arr.style.right  = '';
+
+  if (placement === 'bottom') {
+    arr.className    = 'help-arr-up';
+    arr.style.top    = -HELP_ARR_SZ + 'px';
+    arr.style.bottom = '';
+  } else {
+    arr.className    = 'help-arr-down';
+    arr.style.top    = '';
+    arr.style.bottom = -HELP_ARR_SZ + 'px';
+  }
+}
+
+function renderHelp() {
+  const step  = HELP_STEPS[helpCurrent];
+  const total = HELP_STEPS.length;
+  const el       = step.highlight ? document.getElementById(step.highlight) : null;
+  const fullRect = el ? el.getBoundingClientRect() : null;
+  // anchorTop: 툴팁 배치는 요소 상단 기준, SVG는 전체 요소 하이라이트
+  const anchorRect = (fullRect && step.anchorTop)
+    ? { left: fullRect.left, right: fullRect.right, width: fullRect.width,
+        top: fullRect.top, bottom: fullRect.top + 60, height: 60 }
+    : fullRect;
+
+  // SVG 스포트라이트 (전체 요소)
+  _updateSVG(fullRect);
+
+  // 진행 점
+  document.getElementById('help-progress').innerHTML =
+    HELP_STEPS.map((_, i) =>
+      `<span class="help-dot${i === helpCurrent ? ' active' : ''}"></span>`
+    ).join('');
+
+  // 본문
+  document.getElementById('help-tip-content').innerHTML = `
+    <div class="help-icon">${step.icon}</div>
+    <h3 class="help-title">${step.title}</h3>
+    <div class="help-desc">${step.desc}</div>
+    <div class="help-counter">${helpCurrent + 1} / ${total}</div>
+  `;
+
+  // 버튼 상태
+  document.getElementById('help-prev').disabled = helpCurrent === 0;
+  const nextBtn = document.getElementById('help-next');
+  if (helpCurrent === total - 1) {
+    nextBtn.textContent = '완료 ✓';
+    nextBtn.onclick = closeHelp;
+  } else {
+    nextBtn.textContent = '다음 ▶';
+    nextBtn.onclick = () => helpStep(1);
+  }
+
+  // 툴팁 위치
+  if (anchorRect) {
+    _positionTooltip(anchorRect);
+  } else {
+    // 하이라이트 없으면 화면 중앙
+    const tip = document.getElementById('help-tooltip');
+    tip.style.top  = Math.max(HELP_PAD, (window.innerHeight - tip.offsetHeight) / 2) + 'px';
+    tip.style.left = Math.max(HELP_PAD, (window.innerWidth  - HELP_TIP_W)       / 2) + 'px';
+    document.getElementById('help-tip-arrow').className = '';
+  }
+}
+
+// 창 크기 변경 시 재계산
+window.addEventListener('resize', () => { if (helpActive) renderHelp(); });
+</script>
 </body>
 </html>

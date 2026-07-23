@@ -1,6 +1,8 @@
 """Qwen3 모델 래퍼 — GGUF(llama-cpp)와 transformers(MPS) 통일 인터페이스."""
 
 import re
+import torch
+
 from pathlib import Path
 
 MODEL_DIR  = Path(__file__).resolve().parent.parent / "model" / "qwen"
@@ -102,7 +104,8 @@ class QwenGGUF(QwenBase):
 
 class QwenTransformers(QwenBase):
     def __init__(self, model_dir: Path = BF16_DIR):
-        import torch
+        # 지연 로딩: transformers는 모델 로드 시에만 필요하므로 __init__ 안에서 import.
+        # torch는 _generate에서도 쓰므로 상단에 선언.
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -114,7 +117,6 @@ class QwenTransformers(QwenBase):
         self.model.eval()
 
     def _generate(self, messages: list) -> str:
-        import torch
         try:
             # tokenize=False로 문자열을 먼저 받고 별도 토크나이징
             text = self.tokenizer.apply_chat_template(
