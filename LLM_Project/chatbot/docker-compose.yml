@@ -6,6 +6,8 @@ services:
     env_file:
       - api_keys          # ANTHROPIC_API_KEY, LANGSMITH_API_KEY
     volumes:
+      # 학습된 모델 가중치 — 용량 문제로 git/이미지에 포함하지 않고 호스트에서 마운트
+      - ./source/model:/app/source/model
       # 사용자 데이터 & 히스토리 영속화
       - ./source/data:/app/source/data
       # FAISS 캐시 영속화 (재빌드 방지)

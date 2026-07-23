@@ -6,6 +6,7 @@ services:
     env_file:
       - api_keys
     volumes:
+      - ./source/model:/app/source/model
       - ./source/data:/app/source/data
       - ./source/.cache:/app/source/.cache
     restart: unless-stopped

@@ -1,5 +1,5 @@
-# BF16 GGUF는 HuggingFace 폴더(Qwen3-1.7B/)와 동일 모델 — 중복 제외
-source/model/qwen/Qwen3-1.7B-BF16.gguf
+# 모델 가중치 — git에 없고 볼륨 마운트로 제공되므로 이미지 빌드에서 제외
+source/model
 
 # 불필요한 파일
 source/.cache
