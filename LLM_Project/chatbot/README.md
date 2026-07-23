@@ -281,6 +281,12 @@ uv run uvicorn app:app
 source .venv/bin/activate && uvicorn app:app
 ```
 
+또는 `chatbot/` 루트 디렉토리에서 `start.sh`로 실행할 수도 있습니다.
+```bash
+# chatbot/ 디렉토리에서
+./start.sh
+```
+
 ### Docker로 실행 (EC2 배포)
 
 모델 파일(.pt, GGUF)이 이미지에 포함되어 있어 별도 다운로드 없이 바로 실행 가능합니다.
