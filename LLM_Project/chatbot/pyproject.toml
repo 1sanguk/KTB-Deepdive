@@ -30,3 +30,6 @@ dependencies = [
 ]
 
 [tool.uv]
+# korpora가 python_version 조건 없이 dataclasses==0.8을 선언해서 생기는 설치 실패 우회
+# (dataclasses 0.7/0.8은 Requires-Python<3.7 이라 3.12에서는 애초에 설치 불가·불필요)
+override-dependencies = ["dataclasses; python_version < '3.7'"]
