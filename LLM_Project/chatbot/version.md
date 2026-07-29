@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-07-29 — SOP GPT HF Hub 전환 + vLLM/Ollama 서빙 분리 + RPG 특화 브랜딩 + 응답 시간 측정](#2026-07-29--sop-gpt-hf-hub-전환--vllmollama-서빙-분리--rpg-특화-브랜딩--응답-시간-측정)
 - [2026-07-23 — 4모델 비교 UI + Gemini Judge + Docker + CI/CD](#2026-07-23--4모델-비교-ui--gemini-judge--docker--cicd)
 - [2026-07-13 — LangGraph 엔드포인트 단일화 + FAISS 캐시 버그 수정](#2026-07-13--langgraph-엔드포인트-단일화--faiss-캐시-버그-수정)
 - [2026-07-09 — DPO 완료 + PBKDF2 패스워드 해싱 + Q4_K_M 자동 Think 최적화 + Claude Agent Graph 서빙 연동 + 코드 구조 리팩토링](#2026-07-09--dpo-완료--pbkdf2-패스워드-해싱--q4_km-자동-think-최적화--claude-agent-graph-서빙-연동)
@@ -19,6 +20,116 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-07-29 — SOP GPT HF Hub 전환 + vLLM/Ollama 서빙 분리 + RPG 특화 브랜딩 + 응답 시간 측정
+
+### 핵심 변경 목적
+
+SOP GPT 모델 로딩 방식을 로컬 `.pt` 파일에서 HuggingFace Hub(`1sangukn/sop-gpt`)로 전환했다. Qwen 슬롯에 vLLM(또는 Ollama) 외부 서버 연동을 추가해 챗봇 앱과 모델 서버를 분리했다. 서비스 포지셔닝을 "RPG 게이머 특화 멀티모델 AI Q&A"로 확정하고, Judge 표기를 전체적으로 Gemini로 수정했다. 4개 모델 각각의 실제 응답 시간을 측정해 Gemini Judge 프롬프트에 전달한다.
+
+---
+
+### 신규 파일
+
+| 파일 | 역할 |
+|---|---|
+| `source/llm/vllm_llm.py` | vLLM / Ollama OpenAI-compatible API 클라이언트 (`VLLMQwen`) |
+| `scripts/serve_vllm.sh` | vLLM 서버 실행 스크립트 (GPU/CPU 자동 감지) |
+| `ragdata/rpg/rpg_final_fantasy.md` | Final Fantasy I~XVI RAG 데이터 |
+| `ragdata/rpg/rpg_fromsoftware.md` | 다크소울·엘든 링·세키로 RAG 데이터 |
+| `ragdata/rpg/rpg_wrpg.md` | 스카이림·폴아웃·위처3·발더스게이트3 RAG 데이터 |
+| `ragdata/rpg/rpg_pokemon.md` | 포켓몬 1~9세대·배틀 시스템 RAG 데이터 |
+| `ragdata/rpg/rpg_diablo_haksl.md` | 디아블로·PoE·로스트아크 RAG 데이터 |
+| `ragdata/rpg/rpg_mobile_kr.md` | 리니지M/2M/W·원신·에픽세븐·니케 RAG 데이터 |
+| `ragdata/rpg/rpg_history.md` | D&D(1974)~현재까지 RPG 역사 RAG 데이터 |
+| `ragdata/rpg/rpg_nexon_games.md` | 메이플스토리·던전앤파이터·마비노기 RAG 데이터 |
+
+---
+
+### SOP GPT HuggingFace Hub 전환 (`source/app/state.py`)
+
+로컬 `.pt` 파일 로딩(`torch.load`) 방식을 `from_pretrained()` 방식으로 교체. BPE 토크나이저도 `SopGptTokenizer.from_pretrained()`로 통일.
+
+```python
+# 이전
+vocab, merges = load_bpe(BPE_PATH)
+gen_model = SOP_GPT(vocab_size).to(device)
+gen_model.load_state_dict(torch.load(GEN_CKPT, map_location=device))
+
+# 이후
+tokenizer = SopGptTokenizer.from_pretrained("1sangukn/sop-gpt", local_files_only=True)
+gen_model = SopGptForCausalLM.from_pretrained("1sangukn/sop-gpt",
+    trust_remote_code=True, torch_dtype=torch.float16, local_files_only=True).eval().to(device)
+```
+
+`local_files_only=True`로 오프라인 캐시 우선 사용, 네트워크 불필요.
+
+---
+
+### vLLM / Ollama 서빙 분리 (`source/llm/vllm_llm.py`, `source/app/state.py`)
+
+**`VLLMQwen`** — `httpx.Client`로 OpenAI-compatible `/v1/chat/completions` 호출. `QwenTransformers`/`QwenGGUF`와 동일 인터페이스(`ask`, `ask_with_context`) 유지 → drop-in 교체.
+
+**state.py 분기 로직**:
+```python
+if VLLM_BASE_URL 환경변수 있음:
+    _VLLM_URL = env 값  # Ollama(11434) 또는 원격 vLLM(8001) 모두 커버
+elif vllm 패키지 설치됨:
+    _VLLM_URL = "http://localhost:8001/v1"
+else:
+    _VLLM_URL = ""  # 로컬 모델 폴백
+```
+
+`VLLMQwen().health_check()`가 성공하면 qwen·qwen-q 슬롯 모두 단일 외부 서버 인스턴스로 매핑.
+
+**실행 예시**:
+```bash
+VLLM_BASE_URL=http://localhost:11434/v1 VLLM_MODEL=qwen3:1.7b \
+uv run uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+### 응답 시간 측정 + Judge 프롬프트 반영 (`source/app/streaming.py`)
+
+`model_times: dict = {}` 딕셔너리를 `compare_stream` 범위에 추가. 세마포어 획득 직후 `_start = loop.time()`로 순수 추론 시간만 측정.
+
+```python
+finally:
+    elapsed = round(loop.time() - _start, 1)
+    model_times[key] = elapsed
+    await merged_q.put({"type": "model_done", "model": key, "elapsed": elapsed})
+```
+
+Gemini Judge 프롬프트에 소요 시간 포함:
+```
+- SOP_GPT (1.2초): ...
+- Claude (3.3초): ...
+- Qwen BF16 (32.2초): ...
+- Qwen Q4 (15.9초): ...
+걸린 시간 대비 가장 정확하고 유용한 답변을 선택하세요.
+```
+
+---
+
+### MPS 데드락 방지 — `asyncio.Semaphore(1)` (`source/app/streaming.py`)
+
+Mac MPS는 스레드 안전하지 않아 여러 로컬 Torch 모델이 동시에 `generate()`를 호출하면 데드락 발생. `contextlib.nullcontext()`로 Claude/외부 API 호출은 Semaphore 없이 병렬 유지.
+
+타임아웃 `_MODEL_TIMEOUT = 120초` 추가 → `queue.Empty` 시 `[타임아웃]` 메시지 반환.
+
+---
+
+### RPG 특화 브랜딩 + UI 개선 (`source/app/static/index.html`, `style.css`)
+
+- 서브타이틀: "Claude 자동 평가" → "Gemini 자동 평가"
+- 환영 메시지: "Claude가 가장 잘된 답변을 선별" → "Gemini가 가장 잘된 답변을 선별"
+- 입력창 placeholder 6개 RPG 예시 질문으로 3초마다 rotating
+- Tab 키: placeholder 텍스트("예: " 접두어 제거)를 입력창에 즉시 자동완성
+- `◀ 비교` 버튼으로 오른쪽 비교 패널 토글 기능 추가
+- model-loader 관련 스타일 전체 제거 (`style.css`)
 
 ---
 

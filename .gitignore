@@ -9,6 +9,10 @@
 *.pdf
 *.pt
 *.pyc
+*.safetensors
+LLM_Project/chatbot/source/model/sop_gpt_hf/output/
+LLM_Project/chatbot/source/model/sop_gpt_hf/output_qa/
+LLM_Project/chatbot/source/model/sop_gpt_hf/output_span/
 .cache/
 .env
 .venv/
@@ -29,3 +33,4 @@ train_all.sh
 !review.md
 !version.md
 !wireshark_report.md
+!LLM_Project/chatbot/basicdata/architecture.md

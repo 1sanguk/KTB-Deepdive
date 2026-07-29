@@ -216,6 +216,7 @@ def get_claude_langgraph_history(thread_id: str = Query(...)):
     return {"messages": state.load_history(claude_tid)}
 
 
+
 @router.get("/chat/auto/history")
 def get_auto_history(thread_id: str = Query(...)):
     tid = _tid(thread_id)

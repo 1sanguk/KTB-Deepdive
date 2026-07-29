@@ -1,6 +1,7 @@
 """SSE(Server-Sent Events) 스트리밍 헬퍼."""
 
 import asyncio
+import contextlib
 import json
 import queue
 import re
@@ -196,6 +197,8 @@ async def agent_lg_stream(graph: CompiledStateGraph, question: str, thread_id: s
             pass
 
 
+_MODEL_TIMEOUT = 120  # 모델당 추론 최대 대기 시간 (초)
+
 MODEL_NAMES_KO = {
     "sop":    "SOP_GPT",
     "claude": "Claude (Haiku)",
@@ -250,67 +253,84 @@ def _parse_best_model(text: str) -> str | None:
 
 
 async def compare_stream(question: str, thread_id: str | None) -> AsyncGenerator[str, None]:
-    """4개 모델을 병렬 실행하고 Claude가 최선 답변을 판별하는 SSE 스트림."""
+    """4개 모델을 병렬 실행하고 Gemini가 최선 답변을 판별하는 SSE 스트림."""
     model_answers: dict = {}
+    model_times:   dict = {}
     merged_q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    # 로컬 Torch 모델(MPS/CPU)은 동시 generate 시 데드락 → 한 번에 하나씩
+    _torch_sem = asyncio.Semaphore(1)
 
     async def run_via_lg(key: str, graph: Any):
         acc = ""
-        try:
-            if graph is None:
-                acc = "[모델 없음]"
+
+        # Claude는 API 호출이라 semaphore 불필요, 나머지 로컬 Torch 모델만 순차 실행
+        sem = _torch_sem if key != "claude" else contextlib.nullcontext()
+        async with sem:
+            _start = loop.time()
+            try:
+                if graph is None:
+                    acc = "[모델 없음]"
+                    await merged_q.put({"type": "model_text", "model": key, "text": acc})
+                    return
+
+                suffix = {"sop": "", "claude": ":c", "qwen": ":bf16", "qwen-q": ":q4"}[key]
+                base = thread_id or str(uuid.uuid4())
+                cfg = {"configurable": {"thread_id": base + suffix}}
+
+                q = queue.Queue()
+
+                def _fn():
+                    try:
+                        for chunk in graph.stream({
+                            "query":       question,
+                            "documents":   [],
+                            "score":       0.0,
+                            "answer":      "",
+                            "used_rag":    False,
+                            "retry_count": 0,
+                            "messages":    [],
+                        }, config=cfg):
+                            q.put(chunk)
+                    except Exception as e:
+                        q.put(e)
+                    finally:
+                        q.put(None)
+
+                threading.Thread(target=_fn, daemon=True).start()
+
+                while True:
+                    try:
+                        chunk = await loop.run_in_executor(
+                            None, lambda: q.get(timeout=_MODEL_TIMEOUT)
+                        )
+                    except queue.Empty:
+                        acc = f"[타임아웃] {_MODEL_TIMEOUT}초 내에 응답을 받지 못했습니다."
+                        await merged_q.put({"type": "model_text", "model": key, "text": acc})
+                        break
+                    if chunk is None:
+                        break
+                    if isinstance(chunk, Exception):
+                        acc = f"[오류] {type(chunk).__name__}: {chunk}"
+                        await merged_q.put({"type": "model_text", "model": key, "text": acc})
+                        break
+                    if "generate_span" in chunk:
+                        acc = chunk["generate_span"].get("answer", "")
+                        await merged_q.put({"type": "model_text", "model": key, "text": acc})
+                    elif "generate_direct" in chunk:
+                        acc = chunk["generate_direct"].get("answer", "")
+                        await merged_q.put({"type": "model_text", "model": key, "text": acc})
+            except Exception as e:
+                acc = f"[오류] {e}"
                 await merged_q.put({"type": "model_text", "model": key, "text": acc})
-                return
-
-            suffix = {"sop": "", "claude": ":c", "qwen": ":bf16", "qwen-q": ":q4"}[key]
-            base = thread_id or str(uuid.uuid4())
-            cfg = {"configurable": {"thread_id": base + suffix}}
-
-            q = queue.Queue()
-
-            def _fn():
-                try:
-                    for chunk in graph.stream({
-                        "query":       question,
-                        "documents":   [],
-                        "score":       0.0,
-                        "answer":      "",
-                        "used_rag":    False,
-                        "retry_count": 0,
-                        "messages":    [],
-                    }, config=cfg):
-                        q.put(chunk)
-                except Exception as e:
-                    q.put(e)
-                finally:
-                    q.put(None)
-
-            threading.Thread(target=_fn, daemon=True).start()
-
-            while True:
-                chunk = await loop.run_in_executor(None, q.get)
-                if chunk is None:
-                    break
-                if isinstance(chunk, Exception):
-                    acc = f"[오류] {type(chunk).__name__}: {chunk}"
+            finally:
+                if not acc:
+                    acc = "응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요."
                     await merged_q.put({"type": "model_text", "model": key, "text": acc})
-                    break
-                if "generate_span" in chunk:
-                    acc = chunk["generate_span"].get("answer", "")
-                    await merged_q.put({"type": "model_text", "model": key, "text": acc})
-                elif "generate_direct" in chunk:
-                    acc = chunk["generate_direct"].get("answer", "")
-                    await merged_q.put({"type": "model_text", "model": key, "text": acc})
-        except Exception as e:
-            acc = f"[오류] {e}"
-            await merged_q.put({"type": "model_text", "model": key, "text": acc})
-        finally:
-            if not acc:
-                acc = "응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요."
-                await merged_q.put({"type": "model_text", "model": key, "text": acc})
-            model_answers[key] = acc
-            await merged_q.put({"type": "model_done", "model": key})
+                elapsed = round(loop.time() - _start, 1)
+                model_times[key]   = elapsed
+                model_answers[key] = acc
+                await merged_q.put({"type": "model_done", "model": key, "elapsed": elapsed})
 
     tasks = [
         asyncio.create_task(run_via_lg("sop",    _state.lg_graph)),
@@ -329,14 +349,17 @@ async def compare_stream(question: str, thread_id: str | None) -> AsyncGenerator
     await asyncio.gather(*tasks, return_exceptions=True)
 
     # Gemini가 4개 답변 중 최선을 판별 (자기 편향 방지)
+    def _t(key: str) -> str:
+        return f"{model_times.get(key, '?')}초"
+
     judge_prompt = (
-        f"다음은 동일한 질문에 대한 4개 AI 모델의 답변입니다.\n\n"
+        f"다음은 동일한 질문에 대한 4개 AI 모델의 답변과 각 모델의 응답 소요 시간입니다.\n\n"
         f"질문: {question}\n\n"
-        f"- SOP_GPT: {model_answers.get('sop', '[없음]')}\n"
-        f"- Claude: {model_answers.get('claude', '[없음]')}\n"
-        f"- Qwen BF16: {model_answers.get('qwen', '[없음]')}\n"
-        f"- Qwen Q4: {model_answers.get('qwen-q', '[없음]')}\n\n"
-        f"질문에 대한 답변으로 가장 정확하고 유용한 답변을 선택하고 이유를 2~3문장으로 설명하세요."
+        f"- SOP_GPT ({_t('sop')}): {model_answers.get('sop', '[없음]')}\n"
+        f"- Claude ({_t('claude')}): {model_answers.get('claude', '[없음]')}\n"
+        f"- Qwen BF16 ({_t('qwen')}): {model_answers.get('qwen', '[없음]')}\n"
+        f"- Qwen Q4 ({_t('qwen-q')}): {model_answers.get('qwen-q', '[없음]')}\n\n"
+        f"걸린 시간 대비 가장 정확하고 유용한 답변을 선택하고 이유를 2~3문장으로 설명하세요.\n"
         f"첫 줄에 반드시 아래 형식 중 하나를 그대로 출력하세요 (다른 문자 없이):\n"
         f"최선모델: sop\n최선모델: claude\n최선모델: qwen\n최선모델: qwen-q"
     )

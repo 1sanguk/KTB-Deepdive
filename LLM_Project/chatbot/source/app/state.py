@@ -1,66 +1,73 @@
 """서버 시작 시 한 번만 로드되는 모델·체인·검색기 전역 상태."""
 
+import importlib.util
+import os
+import sys
 import torch
 from pathlib import Path
 
-from model import device, SOP_GPT, SOP_GPT_Span
-from bpe import build_vocab, base_alphabet, load_bpe
+_SOURCE = Path(__file__).resolve().parent.parent
+_HF_PKG = _SOURCE / "model" / "sop_gpt_hf"
+# sop_model/model.py가 'model' 모듈로 인식되는 충돌 방지 — 패키지 경로 직접 주입
+sys.path.insert(0, str(_HF_PKG))
+
+from modeling_sop_gpt import SopGptForCausalLM, SopGptForSpanExtraction  # noqa: E402
+from tokenization_sop_gpt import SopGptTokenizer                           # noqa: E402
 from llm.sop_llm import SOP_GPT_LLM, make_span_extractor
 from lc.chain import build_basic_chain, build_rag_chain
 from lc.retriever import build_hybrid_retriever
 from llm.claude_llm import build_claude_rag_chain
 from llm.qwen_llm import QwenTransformers, QwenGGUF, BF16_DIR, Q4_PATH
+from llm.vllm_llm import VLLMQwen
 from rag.rag import build_tfidf_retriever
 from lg.graph import build_graph, build_claude_graph, build_qwen_graph, build_claude_agent_graph
 from history import load_history, save_history, append_history
 from langgraph.checkpoint.memory import MemorySaver
 
-MODEL_DIR = Path(__file__).resolve().parent.parent / "model" / "sop_model"
+device = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
 
-BPE_PATH  = MODEL_DIR / "bpe_vocab.json"
-GEN_CKPT  = MODEL_DIR / "SOP_GPT.pt"
-QA_CKPT   = MODEL_DIR / "SOP_GPT_qa.pt"
-SPAN_CKPT = MODEL_DIR / "SOP_GPT_span.pt"
+HF_GEN_ID   = "1sangukn/sop-gpt"
+HF_QA_ID    = "1sangukn/sop-gpt-qa"
+HF_SPAN_ID  = "1sangukn/sop-gpt-span"
 
-RAG_SIM_THRESHOLD   = 0.515   # BM25+FAISS 하이브리드 임계값
-TFIDF_SIM_THRESHOLD = 0.25    # TF-IDF 단독 임계값
-GRAPH_SOP_THRESHOLD    = [0.35, 0.25, 0.2]   # SOP 모델: RAG 의존도 높으므로 낮게
-GRAPH_CLAUDE_THRESHOLD = [0.515, 0.375, 0.350]  # Claude: 자체 생성 능력 있으므로 높게 / retry는 F1 최적 구간(0.325~0.375) 기준
+RAG_SIM_THRESHOLD   = 0.515
+TFIDF_SIM_THRESHOLD = 0.25
+GRAPH_SOP_THRESHOLD    = [0.35, 0.25, 0.2]
+GRAPH_CLAUDE_THRESHOLD = [0.515, 0.375, 0.350]
 
 now_count   = 0
 total_count = 12
 
-# ── BPE 토크나이저 ─────────────────────────────────────────────────────────────
-print(f"[{now_count}/{total_count}] BPE 토크나이저 로딩 중...")
-vocab, merges = load_bpe(BPE_PATH)
-stoi, itos    = build_vocab(vocab)
-vocab_size    = len(vocab)
-base_set      = base_alphabet(vocab)
+# ── 토크나이저 (gen·qa·span 공통) ──────────────────────────────────────────────
+print(f"[{now_count}/{total_count}] 토크나이저 로딩 중...")
+tokenizer = SopGptTokenizer.from_pretrained(HF_GEN_ID, local_files_only=True)
 now_count += 1
-print(f"[{now_count}/{total_count}] BPE 토크나이저 로딩 완료.")
+print(f"[{now_count}/{total_count}] 토크나이저 로딩 완료.")
 
-# ── PyTorch 모델 ───────────────────────────────────────────────────────────────
+# float16으로 직접 로드 + local_files_only로 네트워크 체크 생략
+_hf_kwargs = dict(
+    trust_remote_code=True,
+    torch_dtype=torch.float16,
+    local_files_only=True,
+)
+
+# ── HF Hub 모델 로드 ───────────────────────────────────────────────────────────
 print(f"[{now_count}/{total_count}] 이어쓰기 모델(gen) 로딩 중...")
-gen_model = SOP_GPT(vocab_size).to(device)
-gen_model.load_state_dict(torch.load(GEN_CKPT, map_location=device))
-gen_model = gen_model.half()
-gen_model.eval()
+gen_model = SopGptForCausalLM.from_pretrained(HF_GEN_ID, **_hf_kwargs).eval().to(device)
 now_count += 1
 print(f"[{now_count}/{total_count}] 이어쓰기 모델(gen) 로딩 완료.")
 
 print(f"[{now_count}/{total_count}] QA 모델 로딩 중...")
-qa_model = SOP_GPT(vocab_size).to(device)
-qa_model.load_state_dict(torch.load(QA_CKPT, map_location=device))
-qa_model = qa_model.half()
-qa_model.eval()
+qa_model = SopGptForCausalLM.from_pretrained(HF_QA_ID, **_hf_kwargs).eval().to(device)
 now_count += 1
 print(f"[{now_count}/{total_count}] QA 모델 로딩 완료.")
 
 print(f"[{now_count}/{total_count}] Span 추출 모델 로딩 중...")
-span_model = SOP_GPT_Span(vocab_size).to(device)
-span_model.load_state_dict(torch.load(SPAN_CKPT, map_location=device))
-span_model = span_model.half()
-span_model.eval()
+span_model = SopGptForSpanExtraction.from_pretrained(HF_SPAN_ID, **_hf_kwargs).eval().to(device)
 now_count += 1
 print(f"[{now_count}/{total_count}] Span 추출 모델 로딩 완료.")
 
@@ -77,16 +84,16 @@ print(f"[{now_count}/{total_count}] 하이브리드 검색기(BM25+FAISS) 로딩
 
 # ── LangChain LLM ──────────────────────────────────────────────────────────────
 gen_llm = SOP_GPT_LLM(
-    torch_model=gen_model, stoi=stoi, itos=itos, merges=merges, base_set=base_set,
+    hf_model=gen_model, tokenizer=tokenizer,
     stop_on="sentence", temperature=0.7, top_k=None, top_p=0.9,
     repetition_penalty=1.3, max_new_tokens=200,
 )
 qa_llm = SOP_GPT_LLM(
-    torch_model=qa_model, stoi=stoi, itos=itos, merges=merges, base_set=base_set,
+    hf_model=qa_model, tokenizer=tokenizer,
     stop_on="sentence", temperature=0.7, top_k=40, top_p=0.9,
     repetition_penalty=1.3, max_new_tokens=250, min_new_tokens=20,
 )
-span_extractor_fn = make_span_extractor(span_model, stoi, merges, base_set)
+span_extractor_fn = make_span_extractor(span_model, tokenizer)
 
 # ── LCEL 체인 ──────────────────────────────────────────────────────────────────
 basic_chain     = build_basic_chain(qa_llm)
@@ -97,23 +104,52 @@ lc_rag_chain    = build_rag_chain(lc_retriever,    qa_llm, span_extractor_fn, RA
 claude_tfidf_chain = build_claude_rag_chain(tfidf_retriever, TFIDF_SIM_THRESHOLD)
 claude_lc_chain    = build_claude_rag_chain(lc_retriever,    RAG_SIM_THRESHOLD)
 
-if BF16_DIR.exists():
-    print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 중...")
-    qwen_llm = QwenTransformers(BF16_DIR)
-    now_count += 1
-    print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 완료.")
-else:
-    print(f"[skip] Qwen BF16 모델 없음 — qwen 엔드포인트 비활성화")
-    qwen_llm = None
+_VLLM_URL_ENV   = os.environ.get("VLLM_BASE_URL", "")
+_VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
 
-if Q4_PATH.exists():
-    print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
-    qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
-    now_count += 1
-    print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
+# VLLM_BASE_URL 명시 → Ollama/vLLM 모두 커버
+# vllm 패키지 설치됨 → 기본 vLLM 포트(8001) 시도
+# 둘 다 없으면 → 로컬 모델
+if _VLLM_URL_ENV:
+    _VLLM_URL = _VLLM_URL_ENV
+elif _VLLM_INSTALLED:
+    _VLLM_URL = "http://localhost:8001/v1"
 else:
-    print(f"[skip] Qwen Q4 모델 없음 — qwen-q 엔드포인트 비활성화")
-    qwen_quant_llm = None
+    _VLLM_URL = ""
+
+if _VLLM_URL:
+    # ── 외부 서버 모드 (vLLM 또는 Ollama) ────────────────────────────────────
+    print(f"[{now_count}/{total_count}] 외부 LLM 서버 연결 중... ({_VLLM_URL})")
+    _vllm = VLLMQwen()
+    if _vllm.health_check():
+        qwen_llm       = _vllm
+        qwen_quant_llm = _vllm   # 단일 서버를 두 슬롯 모두에 매핑
+        now_count += 1
+        print(f"[{now_count}/{total_count}] 외부 LLM 서버 연결 완료 — qwen·qwen-q 슬롯 사용.")
+    else:
+        print(f"[경고] 서버({_VLLM_URL})에 연결할 수 없음 — 로컬 모델로 폴백")
+        qwen_llm       = None
+        qwen_quant_llm = None
+else:
+    # ── 로컬 모델 (기존 동작) ──────────────────────────────────────────────────
+    print(f"[info] 외부 LLM 서버 없음 — 로컬 모델 로딩")
+    if BF16_DIR.exists():
+        print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 중...")
+        qwen_llm = QwenTransformers(BF16_DIR)
+        now_count += 1
+        print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 완료.")
+    else:
+        print(f"[skip] Qwen BF16 모델 없음 — qwen 엔드포인트 비활성화")
+        qwen_llm = None
+
+    if Q4_PATH.exists():
+        print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
+        qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
+        now_count += 1
+        print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
+    else:
+        print(f"[skip] Qwen Q4 모델 없음 — qwen-q 엔드포인트 비활성화")
+        qwen_quant_llm = None
 
 print(f"[{now_count}/{total_count}] LangGraph 파이프라인 빌드 중...")
 lg_graph = build_graph(lc_retriever, qa_llm, span_extractor_fn, GRAPH_SOP_THRESHOLD,

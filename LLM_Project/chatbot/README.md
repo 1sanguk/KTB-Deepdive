@@ -10,6 +10,9 @@ BPE 토크나이저 → GPT 학습 → RAG → LangChain/LangGraph 파이프라�
 # 전체 구조도
 ![전체 구조도](images/execution_architecture.png)
 
+Mermaid로 작성한 최신 구조도와 세부 실행 흐름은
+[아키텍처 문서](basicdata/architecture.md)에서 확인할 수 있다.
+
 ## 특징
 
 | 항목 | 내용 |
@@ -20,7 +23,10 @@ BPE 토크나이저 → GPT 학습 → RAG → LangChain/LangGraph 파이프라�
 | 자동 라우팅 | Claude Haiku가 질문 유형 분류(chit_chat/factual/general) → 체인 자동 선택 |
 | UI | 4모델 비교 경연 UI (SOP_GPT · Claude · Qwen BF16 · Qwen Q4) + 마크다운 렌더링 + SSE 실시간 스트리밍 |
 | Judge | Gemini Flash가 4개 답변 중 최선 선정 + 세션 종합 평가 (자기 편향 방지) |
-| 서빙 | FastAPI + LangSmith 트레이싱 (APAC 엔드포인트) |
+| 응답 시간 측정 | 모델별 실제 추론 시간을 측정해 Gemini Judge 프롬프트에 전달 — 시간 대비 최선 답변 선정 |
+| Qwen 서빙 | vLLM / Ollama 외부 서버 연동 (`VLLM_BASE_URL` 환경변수), 없으면 로컬 모델 폴백 |
+| MPS 동시성 | `asyncio.Semaphore(1)`로 로컬 Torch 모델 순차 실행 → Mac MPS 데드락 방지 |
+| 서빙 | FastAPI (LangSmith 트레이싱 비활성화) |
 
 ---
 
@@ -67,16 +73,20 @@ SOP_GPT 본체에 `qa_head: Linear(768 → 2)`를 달아 참고 문단 안에서
 | `SOP_GPT_qa.pt` | Stage 2 — RAG 미달 시 직접 답변 |
 | `SOP_GPT_span.pt` | Stage 4 — RAG 성공 시 컨텍스트에서 정답 구간 추출 |
 
-### Qwen3-1.7B — BF16 vs Q4_K_M
+### Qwen3-1.7B — 서빙 방식 선택
 
-두 추론 엔진을 모두 지원한다. 용도에 따라 선택할 수 있도록 UI에서 별도 엔드포인트로 분리해뒀다.
+세 가지 방식을 지원한다. `VLLM_BASE_URL` 환경변수 유무로 자동 분기된다.
 
-| 엔진 | 백엔드 | 메모리 | 특징 |
+| 방식 | 백엔드 | 메모리 | 특징 |
 |---|---|---|---|
-| BF16 | Transformers + MPS | MPS 3.3 GB | 정확도 우세, 로딩 빠름 |
-| Q4_K_M | llama-cpp + Metal | RSS 1.4 GB | 속도 우세, 메모리 절감 |
+| vLLM (권장, GPU 서버) | vLLM OpenAI API | GPU VRAM | PagedAttention·continuous batching, 1~3초/응답 |
+| Ollama Docker (Plan B, Mac) | Ollama OpenAI API | CPU RAM | 동일 API 호환, CPU에서 15~32초/응답 |
+| 로컬 BF16 | Transformers + MPS | MPS 3.3 GB | 환경변수 없을 때 폴백 |
+| 로컬 Q4_K_M | llama-cpp + Metal | RSS 1.4 GB | 환경변수 없을 때 폴백 |
 
-**Q4_K_M 설정**: context 추출 요청(`ask_with_context`)은 항상 `/no_think`, 30자 이상 물음표 포함 질문은 `/think` 자동 활성화. thinking 완료 후 빈 답변이면 `/no_think` 폴백. temperature 0.7 / top_p 0.9 명시.
+**vLLM/Ollama 설정**: `VLLM_BASE_URL`을 설정하면 qwen·qwen-q 슬롯 모두 단일 외부 서버에 매핑. `VLLMQwen.health_check()` 실패 시 로컬 모델로 폴백.
+
+**로컬 Q4_K_M 설정**: context 추출 요청은 항상 `/no_think`, 30자 이상 물음표 포함 질문은 `/think` 자동 활성화. thinking 완료 후 빈 답변이면 `/no_think` 폴백. temperature 0.7 / top_p 0.9 명시.
 
 KorQuAD 100문항 기준 벤치마크: BF16 **82%** / 2.68s · Q4_K_M **80%** / 0.81s — [상세 결과 →](basicdata/eval.md#qwen3-17b-bf16-vs-q4_k_m-벤치마크)
 
@@ -166,7 +176,8 @@ chatbot/
     │   ├── sop_llm.py          # SOP_GPT → LangChain LLM 래퍼
     │   ├── claude_llm.py       # Claude API (답변·스트리밍·Agent 도구)
     │   ├── qwen_llm.py         # Qwen3-1.7B (QwenTransformers BF16 + QwenGGUF Q4_K_M)
-    │   └── gemini_llm.py       # Google Gemini Flash (Judge 전용 스트리밍)
+    │   ├── gemini_llm.py       # Google Gemini Flash (Judge 전용 스트리밍)
+    │   └── vllm_llm.py         # vLLM / Ollama OpenAI-compatible API 클라이언트
     ├── lc/                     # LangChain 통합
     │   ├── retriever.py        # HybridRetriever (BM25 + FAISS)
     │   ├── chain.py            # LCEL 체인 조립
@@ -180,6 +191,7 @@ chatbot/
     │   ├── history/
     │   └── sessions/
     └── model/
+        ├── sop_gpt_hf/         # SOP GPT HuggingFace 커스텀 모델 패키지 (modeling/tokenization)
         ├── sop_model/          # SOP_GPT 학습·추론 패키지
         │   ├── bpe.py          # BPE 토크나이저 직접 구현
         │   ├── tokenizer.py    # 코퍼스 로딩 (kowikitext, 챗봇 Q&A, AI Hub)
@@ -187,10 +199,7 @@ chatbot/
         │   ├── train_utils.py  # 공통 학습 루프 (early stopping, bf16 autocast)
         │   ├── chat.py         # 추론 함수 (chat_qa, extract_answer)
         │   ├── dpo.py          # DPO 학습 모듈 (Stage 5)
-        │   ├── main.py         # 진입점 (train / chat 모드)
-        │   ├── SOP_GPT.pt      # Stage 1 체크포인트
-        │   ├── SOP_GPT_qa.pt   # Stage 2 체크포인트
-        │   └── SOP_GPT_span.pt # Stage 4 체크포인트
+        │   └── main.py         # 진입점 (train / chat 모드)
         └── qwen/               # Qwen3-1.7B 모델 파일 (BF16 + Q4_K_M GGUF)
 ```
 
@@ -235,11 +244,11 @@ chatbot/
 ## 환경 설정
 
 ```
-# .env
-LANGSMITH_TRACING=true
-LANGCHAIN_TRACING_V2=true
-LANGSMITH_ENDPOINT=https://apac.api.smith.langchain.com
-LANGSMITH_PROJECT=adapterz-langchain-textbook
+# .env (LangSmith 비활성화 — 트레이싱이 필요하면 주석 해제)
+# LANGSMITH_TRACING=true
+# LANGCHAIN_TRACING_V2=true
+# LANGSMITH_ENDPOINT=https://apac.api.smith.langchain.com
+# LANGSMITH_PROJECT=adapterz-langchain-textbook
 
 # api_keys
 LANGSMITH_API_KEY=...
@@ -286,6 +295,30 @@ source .venv/bin/activate && uvicorn app:app
 # chatbot/ 디렉토리에서
 ./start.sh
 ```
+
+### Qwen을 vLLM/Ollama로 서빙 (권장)
+
+**Ollama Docker (Mac Plan B)**:
+```bash
+docker run -d -p 11434:11434 --name ollama ollama/ollama
+docker exec -it ollama ollama pull qwen3:1.7b
+
+# 챗봇 실행 시 환경변수 지정
+VLLM_BASE_URL=http://localhost:11434/v1 VLLM_MODEL=qwen3:1.7b \
+uv run uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+**vLLM (Linux GPU 서버)**:
+```bash
+chmod +x scripts/serve_vllm.sh
+./scripts/serve_vllm.sh          # GPU 자동 감지, 포트 8001
+
+# 챗봇 실행
+VLLM_BASE_URL=http://localhost:8001/v1 \
+uv run uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+`VLLM_BASE_URL`을 설정하지 않으면 로컬 Qwen 모델 파일(BF16/Q4_K_M)로 폴백한다.
 
 ### Docker로 실행 (EC2 배포)
 
@@ -358,4 +391,4 @@ SSE 이벤트 타입: `model_text` · `model_done` · `judge_text` · `judge_don
 - 한국어 멀티세션 대화
 - SNS 데이터 고도화
 
-자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md) · HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md)
+자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md) · HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md) · 아키텍처 구조: [docs/architecture.md](docs/architecture.md)

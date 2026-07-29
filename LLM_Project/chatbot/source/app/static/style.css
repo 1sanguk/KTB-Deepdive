@@ -275,6 +275,22 @@ body {
 }
 #session-export-btn:hover { color: var(--text); border-color: var(--dim); }
 
+#panel-toggle-btn {
+  flex-shrink: 0;
+  background: rgba(91,141,239,.1);
+  border: 1px solid rgba(91,141,239,.3);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+#panel-toggle-btn:hover { background: rgba(91,141,239,.2); }
+#panel-toggle-btn.open  { background: rgba(91,141,239,.2); }
+
 #chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -389,6 +405,16 @@ body {
 
 /* ── Right Panel ──────────────────────────────── */
 #right-panel {
+  max-width: 0;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+  transition: max-width 0.3s ease;
+}
+#right-panel.panel-open {
+  max-width: var(--right-w);
+}
+#right-panel-inner {
   width: var(--right-w);
   min-width: var(--right-w);
   background: var(--surface);
@@ -733,3 +759,4 @@ body {
 .help-prev-btn:disabled { opacity: .3; cursor: default; }
 .help-next-btn { background: var(--accent); color: #fff; }
 .help-next-btn:hover { opacity: .88; }
+
