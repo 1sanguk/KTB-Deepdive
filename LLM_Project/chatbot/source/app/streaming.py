@@ -10,7 +10,7 @@ import uuid
 import state as _state
 from typing import Any, AsyncGenerator, Callable
 
-from history import append_compare_turn, load_history
+from history import append_compare_turn, append_history, load_history
 from lc.chain import _expand_span
 from lc.router import classify_question, CHAIN_FOR, MODE_LABEL
 from llm.claude_llm import stream_claude
@@ -145,13 +145,20 @@ async def with_history(gen: AsyncGenerator[str, None], thread_id: str | None, qu
 
 async def agent_lg_stream(graph: CompiledStateGraph, question: str, thread_id: str | None = None) -> AsyncGenerator[str, None]:
     """Claude Agent Graph(AgentState) 전용 스트리밍."""
+    # JSON 히스토리 로드 → _init_messages 노드가 current question을 이어 붙임
+    prior: list = []
+    if thread_id:
+        for m in load_history(thread_id):
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str):
+                prior.append({"role": m["role"], "content": m["content"]})
+
     q = queue.Queue()
 
     def run():
         try:
             for chunk in graph.stream({
                 "query":             question,
-                "messages":          [],
+                "messages":          prior,
                 "stop_reason":       "",
                 "answer":            "",
                 "used_rag":          False,
@@ -261,6 +268,15 @@ async def compare_stream(question: str, thread_id: str | None) -> AsyncGenerator
     # 로컬 Torch 모델(MPS/CPU)은 동시 generate 시 데드락 → 한 번에 하나씩
     _torch_sem = asyncio.Semaphore(1)
 
+    # ── 정준(canonical) 히스토리 로드 ──────────────────────────────────────────
+    # Gemini가 선택한 best_text 기반으로 저장된 공유 대화 이력.
+    # 모든 모델이 동일한 context를 받도록 단일 파일(thread_id.json)에서 로드.
+    shared_history: list = []
+    if thread_id:
+        for m in load_history(thread_id):
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str):
+                shared_history.append({"role": m["role"], "content": m["content"]})
+
     async def run_via_lg(key: str, graph: Any):
         acc = ""
 
@@ -280,6 +296,9 @@ async def compare_stream(question: str, thread_id: str | None) -> AsyncGenerator
 
                 q = queue.Queue()
 
+                # SOP는 context window 제한(256 token)으로 히스토리 생략
+                seed_messages = [] if key == "sop" else shared_history
+
                 def _fn():
                     try:
                         for chunk in graph.stream({
@@ -289,7 +308,7 @@ async def compare_stream(question: str, thread_id: str | None) -> AsyncGenerator
                             "answer":      "",
                             "used_rag":    False,
                             "retry_count": 0,
-                            "messages":    [],
+                            "messages":    seed_messages,
                         }, config=cfg):
                             q.put(chunk)
                     except Exception as e:
@@ -451,14 +470,14 @@ async def session_judge_stream(thread_id: str | None) -> AsyncGenerator[str, Non
     yield _sse({"type": "done"})
 
 
-async def claude_rag_stream(retriever: Any, threshold: float, question: str) -> AsyncGenerator[str, None]:
+async def claude_rag_stream(retriever: Any, threshold: float, question: str, history: list | None = None) -> AsyncGenerator[str, None]:
     context, score = retriever.best_match(question)
     if score >= threshold:
         yield _sse({"type": "rag_context", "text": context})
-        async for text in stream_claude(question, context):
+        async for text in stream_claude(question, context, history=history):
             yield _sse({"type": "text", "text": text})
     else:
-        async for text in stream_claude(question):
+        async for text in stream_claude(question, history=history):
             yield _sse({"type": "text", "text": text})
     yield _sse({"type": "done"})
 

@@ -158,8 +158,8 @@ now_count += 1
 print(f"[{now_count}/{total_count}] LangGraph 파이프라인 빌드 완료.")
 
 print(f"[{now_count}/{total_count}] Claude LangGraph 파이프라인 빌드 중...")
-claude_graph = build_claude_graph(lc_retriever, GRAPH_CLAUDE_THRESHOLD,
-                                  checkpointer=MemorySaver())
+# JSON 정준 히스토리에서 직접 시드하므로 MemorySaver 불필요 (있으면 중복 누적)
+claude_graph = build_claude_graph(lc_retriever, GRAPH_CLAUDE_THRESHOLD)
 now_count += 1
 print(f"[{now_count}/{total_count}] Claude LangGraph 파이프라인 빌드 완료.")
 
@@ -169,10 +169,8 @@ now_count += 1
 print(f"[{now_count}/{total_count}] Claude Agent Graph 빌드 완료.")
 
 print(f"[{now_count}/{total_count}] Qwen LangGraph 파이프라인 빌드 중...")
-qwen_graph = build_qwen_graph(lc_retriever, qwen_llm, GRAPH_CLAUDE_THRESHOLD,
-                              checkpointer=MemorySaver()) if qwen_llm else None
-qwen_quant_graph = build_qwen_graph(lc_retriever, qwen_quant_llm, GRAPH_CLAUDE_THRESHOLD,
-                                    checkpointer=MemorySaver()) if qwen_quant_llm else None
+qwen_graph = build_qwen_graph(lc_retriever, qwen_llm, GRAPH_CLAUDE_THRESHOLD) if qwen_llm else None
+qwen_quant_graph = build_qwen_graph(lc_retriever, qwen_quant_llm, GRAPH_CLAUDE_THRESHOLD) if qwen_quant_llm else None
 now_count += 1
 print(f"[{now_count}/{total_count}] Qwen LangGraph 파이프라인 빌드 완료.")
 

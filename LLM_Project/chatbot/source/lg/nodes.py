@@ -53,7 +53,10 @@ def make_generate_direct_node(qa_llm: SOP_GPT_LLM) -> Callable[[GraphState], Gra
 def make_generate_claude_context_node() -> Callable[[GraphState], GraphState]:
     """RAG 경로: 검색 문서를 컨텍스트로 Claude에 질문하는 노드를 반환."""
     def generate_context(state: GraphState) -> dict:
-        answer = ask_claude_with_context(state['query'], state['documents'][0])
+        # state['messages'] = [...이전 대화, {"role": "user", "content": 현재질문}]
+        # 현재 질문은 ask_claude_with_context가 직접 추가하므로 [:-1]만 prior로 전달
+        prior = state['messages'][:-1] if state.get('messages') else []
+        answer = ask_claude_with_context(state['query'], state['documents'][0], history=prior)
         return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
 
     return generate_context
@@ -62,7 +65,8 @@ def make_generate_claude_context_node() -> Callable[[GraphState], GraphState]:
 def make_generate_claude_direct_node() -> Callable[[GraphState], GraphState]:
     """직접 답변 경로: 문서 없이 Claude에 질문하는 노드를 반환."""
     def generate_direct(state: GraphState) -> dict:
-        answer = ask_claude(state['query'])
+        prior = state['messages'][:-1] if state.get('messages') else []
+        answer = ask_claude(state['query'], history=prior)
         return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
 
     return generate_direct
@@ -126,10 +130,27 @@ def make_tool_executor_node(retriever: HybridRetriever) -> Callable[[AgentState]
 
 # ── Qwen 노드 ──────────────────────────────────────────────────────────────────
 
+def _format_history_prefix(messages: list) -> str:
+    """이전 대화를 Qwen 프롬프트 앞에 붙일 텍스트로 변환."""
+    parts = []
+    for m in messages:
+        if not (m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)):
+            continue
+        role = "사용자" if m["role"] == "user" else "AI"
+        parts.append(f"{role}: {m['content']}")
+    return "\n".join(parts)
+
+
 def make_generate_qwen_context_node(qwen_llm: QwenBase) -> Callable[[GraphState], GraphState]:
     """RAG 경로: 검색 문서를 컨텍스트로 Qwen에 질문하는 노드를 반환."""
     def generate_context(state: GraphState) -> dict:
-        answer = qwen_llm.ask_with_context(state['query'], state['documents'][0])
+        prior = state['messages'][:-1] if state.get('messages') else []
+        history_text = _format_history_prefix(prior)
+        question = (
+            f"[이전 대화]\n{history_text}\n\n[현재 질문]\n{state['query']}"
+            if history_text else state['query']
+        )
+        answer = qwen_llm.ask_with_context(question, state['documents'][0])
         return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
     return generate_context
 
@@ -137,6 +158,12 @@ def make_generate_qwen_context_node(qwen_llm: QwenBase) -> Callable[[GraphState]
 def make_generate_qwen_direct_node(qwen_llm: QwenBase) -> Callable[[GraphState], GraphState]:
     """직접 답변 경로: 문서 없이 Qwen에 질문하는 노드를 반환."""
     def generate_direct(state: GraphState) -> dict:
-        answer = qwen_llm.ask(state['query'])
+        prior = state['messages'][:-1] if state.get('messages') else []
+        history_text = _format_history_prefix(prior)
+        question = (
+            f"[이전 대화]\n{history_text}\n\n[현재 질문]\n{state['query']}"
+            if history_text else state['query']
+        )
+        answer = qwen_llm.ask(question)
         return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
     return generate_direct

@@ -43,42 +43,54 @@ def _is_retryable(e: Exception) -> bool:
     return False
 
 
-def ask_claude(question: str) -> str:
-    """RAG 없이 Claude가 직접 답변."""
+def _build_prior(history: list | None) -> list:
+    """히스토리에서 Claude API 멀티턴 메시지 형식으로 변환."""
+    return [
+        {"role": m["role"], "content": m["content"]}
+        for m in (history or [])
+        if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+    ]
+
+
+def ask_claude(question: str, history: list | None = None) -> str:
+    """RAG 없이 Claude가 직접 답변. history: 이전 정준 대화 이력."""
+    prior = _build_prior(history)
     try:
         msg = _client().messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            messages=[{"role": "user", "content": question}],
+            messages=prior + [{"role": "user", "content": question}],
         )
         return msg.content[0].text
     except Exception as e:
         return _error_message(e)
 
 
-def ask_claude_with_context(question: str, context: str) -> str:
-    """검색된 참고 문서를 바탕으로 Claude가 답변."""
+def ask_claude_with_context(question: str, context: str, history: list | None = None) -> str:
+    """검색된 참고 문서를 바탕으로 Claude가 답변. history: 이전 정준 대화 이력."""
     prompt = (
         f"다음 참고 문서를 참고하여 질문에 간결하게 답해주세요. "
         f"문서에 직접적인 내용이 없으면 일반 지식을 바탕으로 답변하세요.\n\n"
         f"참고: {context}\n\n"
         f"질문: {question}"
     )
+    prior = _build_prior(history)
     try:
         msg = _client().messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            messages=[{"role": "user", "content": prompt}],
+            messages=prior + [{"role": "user", "content": prompt}],
         )
         return msg.content[0].text
     except Exception as e:
         return _error_message(e)
 
 
-async def stream_claude(question: str, context: str = "") -> AsyncGenerator[str, None]:
+async def stream_claude(question: str, context: str = "", history: list | None = None) -> AsyncGenerator[str, None]:
     """Claude 응답을 토큰 단위로 스트리밍.
     매 yield마다 현재까지 누적된 전체 텍스트를 반환.
     과부하(529/503)·빈 응답은 최대 2회 재시도.
+    history: 이전 대화 이력 [{"role": "user"/"assistant", "content": str}, ...]
     """
     if context:
         prompt = (
@@ -90,13 +102,19 @@ async def stream_claude(question: str, context: str = "") -> AsyncGenerator[str,
     else:
         prompt = question
 
+    prior = [
+        {"role": m["role"], "content": m["content"]}
+        for m in (history or [])
+        if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+    ]
+
     for attempt in range(_STREAM_MAX_RETRIES):
         try:
             accumulated = ""
             async with AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"]).messages.stream(
                 model=MODEL,
                 max_tokens=MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
+                messages=prior + [{"role": "user", "content": prompt}],
             ) as stream:
                 async for text in stream.text_stream:
                     accumulated += text

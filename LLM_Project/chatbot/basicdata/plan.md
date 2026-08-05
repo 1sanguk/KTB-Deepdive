@@ -79,24 +79,40 @@
 ```
 source/
 ├── app/
-│   └── app.py        # FastAPI 서빙 (앱소스)
-└── model/            # 토크나이저/아키텍처/학습/체크포인트 (모델소스)
-    ├── bpe.py
-    ├── tokenizer.py
-    ├── model.py
-    ├── rag.py            # 검색기 (TF-IDF + 임베딩 하이브리드, calibrate)
-    ├── train_utils.py
-    ├── main.py           # 진입점: train / chat / train_qa / chat_qa / train_rag / chat_rag
-    ├── chat.py
-    ├── bpe_vocab.json
-    ├── SOP_GPT.pt
-    ├── SOP_GPT_qa.pt
-    └── SOP_GPT_Span.pt   # Stage4 추출형 QA head
+│   ├── app.py              # FastAPI 진입점 + 라우터 등록
+│   ├── state.py            # HF Hub 모델 로드 + LLM/체인/검색기 초기화
+│   ├── streaming.py        # SSE 헬퍼 (compare_stream 포함)
+│   ├── history.py          # 대화 기록 영속화
+│   ├── sessions.py         # 세션 관리
+│   ├── auth.py             # PBKDF2 로그인
+│   ├── models.py           # Pydantic 스키마
+│   ├── static/             # 웹 UI (index.html + style.css)
+│   └── routers/            # chat.py (non-streaming) + stream.py (SSE)
+├── llm/
+│   ├── sop_llm.py          # SOP_GPT LangChain LLM 래퍼
+│   ├── claude_llm.py       # Claude API 연동
+│   ├── qwen_llm.py         # Qwen3-1.7B (BF16 + Q4_K_M)
+│   ├── gemini_llm.py       # Gemini Flash (Judge 전용)
+│   └── vllm_llm.py         # vLLM / Ollama API 클라이언트
+├── lc/
+│   ├── retriever.py        # BM25+FAISS 하이브리드 검색기
+│   ├── chain.py            # LCEL 체인 조립
+│   └── router.py           # 질문 자동 분류기
+├── lg/
+│   ├── models.py           # GraphState / AgentState TypedDict
+│   ├── nodes.py            # 노드 팩토리 10개
+│   └── graph.py            # StateGraph 조립
+├── rag/rag.py              # KorQuAD 유틸리티 + TF-IDF 검색기
+└── model/
+    ├── sop_gpt_hf/         # HF Hub 모델 패키지
+    ├── sop_model/          # SOP_GPT 학습/추론 패키지
+    └── qwen/               # Qwen3-1.7B 모델 파일
 ```
-- `model/main.py`는 그 디렉터리에서 실행 (상대경로로 `bpe_vocab.json`/체크포인트 참조)
-  - `train`/`chat`은 Stage1, `train_qa`/`chat_qa`는 Stage2, `train_rag`/`chat_rag`는 RAG 흐름 — `chat`/`chat_qa`/`train_qa`는 88M자 Stage1 코퍼스를 불러오지 않아 빠르게 시작됨
-- `app/app.py`는 `__file__` 기준으로 `../model`을 `sys.path`에 추가해 어디서 실행해도 동작
-- `/chat`은 검색 유사도(hybrid_score)에 따라 Stage4(추출형, ≥0.515) ↔ Stage2(잡담형, <0.515)로 자동 라우팅
+- `sop_model/main.py`는 그 디렉터리에서 실행 (`train` / `chat` / `train_qa` / `train_span` / `train_dpo` 모드)
+- `app/app.py`는 FastAPI 서버 진입점. `uvicorn app:app`으로 실행 (source/app/ 디렉터리에서)
+- SOP GPT 모델은 HF Hub(`1sangukn/sop-gpt`)에서 `local_files_only=True`로 로드
+- 자동 라우팅: Claude Haiku가 `chit_chat / factual / general` 분류 → 체인 선택
+- Compare 모드: 4개 모델 병렬 실행 → Gemini Judge 최선 답변 선정
 
 ## Phase 10 — Stage 5: DPO (Direct Preference Optimization) ✅
 - **목적**: Stage 2 SFT 모델이 "어떻게 대답할지"는 알지만 "좋은 답 vs 나쁜 답"을 구분하지 못하는 한계를 개선
@@ -120,6 +136,18 @@ source/
 - **신규 파일**: `source/app/auth.py`, `source/lc/router.py`
 - **신규 엔드포인트**: `POST /auth/login`, `POST /chat/auto/stream`, `POST /chat/claude/auto/stream`, `GET /chat/auto/history`, `GET /chat/claude/auto/history`
 - **UI 개편**: 모드 카드 선택 화면 → 로그인 화면(ID+PWD), 채팅 화면은 자동 라우팅. 각 응답 버블 위에 라우팅 배지(→ LangGraph 검색 등) 표시
+
+## Phase 12 — Compare 모드 정준 히스토리 공유 대화 메모리 ✅
+
+- **문제**: Compare 모드에서 4개 모델이 매 턴마다 컨텍스트 없이 단일 턴으로만 답변. 이전 대화를 전혀 기억하지 못함.
+- **설계**: Gemini Judge 선정 `best_text`(메인 화면 표시 답변)를 기반으로 정준(Canonical) 히스토리 구성. 각 모델의 독립 히스토리가 아닌 단일 공유 컨텍스트로 사용.
+- **구현 파일**:
+  - `source/llm/claude_llm.py`: `_build_prior()` 헬퍼 + `ask_claude`/`ask_claude_with_context`/`stream_claude`에 `history` 파라미터 추가
+  - `source/lg/nodes.py`: Claude 노드가 `state['messages'][:-1]`을 prior로 추출; `_format_history_prefix()` 신규 추가; Qwen 노드가 텍스트 prefix 방식으로 이전 대화 삽입
+  - `source/app/streaming.py`: `compare_stream`에서 `load_history(thread_id)`로 정준 히스토리 로드 → 각 그래프 초기 `messages`에 시딩; `agent_lg_stream`도 동일하게 히스토리 시딩
+  - `source/app/state.py`: `claude_graph`, `qwen_graph`, `qwen_quant_graph`에서 `MemorySaver` 제거 (JSON 시딩과 중복 누적 방지)
+- **SOP 제외 이유**: `block_size=256 token` 한계로 이전 대화를 삽입하면 현재 질문이 잘림 → `seed_messages = []`
+- **MemorySaver 제거 이유**: JSON에서 시딩하면서 MemorySaver도 유지하면 2번째 메시지부터 shared_history가 두 번 누적됨
 
 ## 스트레치 골 (여유 있을 때)
 - temperature / top-k / top-p 샘플링

@@ -2,6 +2,7 @@
 
 날짜별로 무엇이 바뀌었는지 정리한 문서입니다.
 
+- [2026-08-05 — Compare 모드 대화 기억 — 히스토리 공유 컨텍스트](#2026-08-05--compare-모드-대화-기억--히스토리-공유-컨텍스트)
 - [2026-07-29 — SOP GPT HF Hub 전환 + vLLM/Ollama 서빙 분리 + RPG 특화 브랜딩 + 응답 시간 측정](#2026-07-29--sop-gpt-hf-hub-전환--vllmollama-서빙-분리--rpg-특화-브랜딩--응답-시간-측정)
 - [2026-07-23 — 4모델 비교 UI + Gemini Judge + Docker + CI/CD](#2026-07-23--4모델-비교-ui--gemini-judge--docker--cicd)
 - [2026-07-13 — LangGraph 엔드포인트 단일화 + FAISS 캐시 버그 수정](#2026-07-13--langgraph-엔드포인트-단일화--faiss-캐시-버그-수정)
@@ -20,6 +21,133 @@
 - [2026-06-25 — RAG 검색기 LangChain 마이그레이션](#2026-06-25--rag-검색기-langchain-마이그레이션)
 - [2026-06-20 — RAG 아키텍처 적용 (6주차 위클리 챌린지)](#2026-06-20--rag-아키텍처-적용-6주차-위클리-챌린지)
 - [2026-06-14 — 최초 구현 (5주차 위클리 챌린지)](#2026-06-14--최초-구현-5주차-위클리-챌린지)
+
+---
+
+## 2026-08-05 — Compare 모드 대화 기억 — 히스토리 공유 컨텍스트
+
+### 핵심 변경 목적
+
+Compare 모드에서 이전 대화를 기억하지 못하는 문제를 수정했다. 기존에는 각 턴마다 4개 모델이 컨텍스트 없이 단일 턴으로만 답변했다. Gemini Judge가 선정한 `best_text`(메인 화면에 표시되는 답변)를 기반으로 **정준(Canonical) 히스토리**를 구성하고, 이 공유 컨텍스트를 모든 모델의 그래프 초기 상태에 시딩한다.
+
+```
+턴 N 완료 → append_compare_turn → {user: Q}, {assistant: best_text} 저장
+
+턴 N+1 → compare_stream에서 load_history 로드
+         → shared_history = [{user: Q1}, {assistant: best_text1}, ...]
+         → 각 그래프 초기 messages에 shared_history 시딩
+         → 현재 질문은 _init_graph_state가 추가
+         → generate 노드: state['messages'][:-1]이 prior → LLM 전달
+```
+
+---
+
+### `source/llm/claude_llm.py`
+
+**`_build_prior(history)`** 헬퍼 추가: history 리스트에서 `role in ("user", "assistant")` + `content`가 str인 항목만 Claude API 멀티턴 형식으로 변환.
+
+**`history` 파라미터 추가 (`ask_claude`, `ask_claude_with_context`, `stream_claude`):**
+
+```python
+def _build_prior(history: list | None) -> list:
+    return [
+        {"role": m["role"], "content": m["content"]}
+        for m in (history or [])
+        if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+    ]
+
+def ask_claude(question: str, history: list | None = None) -> str:
+    prior = _build_prior(history)
+    msg = _client().messages.create(
+        model=MODEL, max_tokens=MAX_TOKENS,
+        messages=prior + [{"role": "user", "content": question}],
+    )
+```
+
+`stream_claude()`도 동일하게 `prior + [{"role": "user", "content": prompt}]` 형태로 호출.
+
+---
+
+### `source/lg/nodes.py`
+
+**Claude 노드 (`make_generate_claude_direct_node`, `make_generate_claude_context_node`):**
+
+`_init_graph_state`가 현재 user 질문을 `messages`에 추가하므로, generate 노드 시점에 `messages[-1]`은 현재 질문. `[:-1]`이 이전 대화만 추출한다.
+
+```python
+def generate_direct(state: GraphState) -> dict:
+    prior = state['messages'][:-1] if state.get('messages') else []
+    answer = ask_claude(state['query'], history=prior)
+    return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
+```
+
+**`_format_history_prefix(messages)` 신규 추가 + Qwen 노드:**
+
+Qwen은 멀티턴 API가 없으므로 이전 대화를 텍스트 prefix로 변환해 프롬프트 앞에 붙인다.
+
+```python
+def _format_history_prefix(messages: list) -> str:
+    parts = []
+    for m in messages:
+        if not (m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)):
+            continue
+        role = "사용자" if m["role"] == "user" else "AI"
+        parts.append(f"{role}: {m['content']}")
+    return "\n".join(parts)
+
+def generate_direct(state: GraphState) -> dict:   # Qwen 노드
+    prior = state['messages'][:-1] if state.get('messages') else []
+    history_text = _format_history_prefix(prior)
+    question = (
+        f"[이전 대화]\n{history_text}\n\n[현재 질문]\n{state['query']}"
+        if history_text else state['query']
+    )
+    answer = qwen_llm.ask(question)
+    return {"answer": answer, "messages": [{"role": "assistant", "content": answer}]}
+```
+
+---
+
+### `source/app/streaming.py`
+
+**`compare_stream`**: 각 턴 시작 시 정준 히스토리를 로드해 모든 그래프의 초기 `messages`에 시딩한다. SOP_GPT는 `block_size=256 token` 한계로 이전 대화 삽입이 불가 → `seed_messages = []` 적용.
+
+```python
+async def compare_stream(question: str, thread_id: str | None):
+    shared_history: list = []
+    if thread_id:
+        for m in load_history(thread_id):
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str):
+                shared_history.append({"role": m["role"], "content": m["content"]})
+
+    async def run_via_lg(key: str, graph: Any):
+        seed_messages = [] if key == "sop" else shared_history  # SOP 제외
+        for chunk in graph.stream({
+            "query": question,
+            "messages": seed_messages,   # ← 정준 히스토리 시드
+            ...
+        }, config=cfg):
+```
+
+**`agent_lg_stream`**: 동일하게 JSON 히스토리 로드 후 그래프 초기 state에 시딩.
+
+**`claude_rag_stream`**: `history` 파라미터 추가 → `stream_claude(..., history=history)` 전달.
+
+---
+
+### `source/app/state.py` — MemorySaver 제거
+
+JSON 정준 히스토리에서 직접 시딩하므로 `MemorySaver`를 함께 두면 2번째 메시지부터 shared_history가 중복 누적된다. `claude_graph`, `qwen_graph`, `qwen_quant_graph`에서 `MemorySaver` 제거.
+
+```python
+# 변경 전
+claude_graph = build_claude_graph(lc_retriever, GRAPH_CLAUDE_THRESHOLD,
+                                  checkpointer=MemorySaver())
+# 변경 후 — JSON 시딩으로 대체하므로 MemorySaver 불필요
+claude_graph = build_claude_graph(lc_retriever, GRAPH_CLAUDE_THRESHOLD)
+```
+
+`lg_graph`(SOP_GPT)만 MemorySaver 유지 — `sop_lg_stream`에서 `graph.get_state()`로 messages를 읽어 히스토리에 저장하는 기존 흐름이 필요하기 때문.
 
 ---
 

@@ -143,7 +143,7 @@ init → retrieve → grade → generate_span    (RAG 성공)
 | SOP_GPT | `[0.35, 0.25, 0.2]` | RAG 의존도 높아 낮게 설정 |
 | Claude / Qwen3 | `[0.515, 0.375, 0.350]` | 자체 생성 능력 있어 높게 설정 (empirical 검증) |
 
-**메모리**: `MemorySaver`(단기) + JSON 파일(장기). 비교 세션 ID에 모델별 suffix(`:c`, `:bf16`, `:q4`)를 붙여 그래프 상태를 격리한다.
+**대화 메모리**: Gemini Judge가 선정한 `best_text`를 정준(Canonical) 히스토리로 `data/history/{thread_id}.json`에 저장한다. 다음 턴 시작 시 `compare_stream`이 이 히스토리를 로드해 Claude·Qwen 그래프의 초기 `messages`에 시딩한다. SOP_GPT는 block_size=256 token 한계로 히스토리 시딩 제외. `lg_graph`(SOP)만 MemorySaver 유지, Claude·Qwen 그래프는 JSON 시딩으로 대체해 MemorySaver 제거.
 
 엔진별 그래프: `build_graph(SOP_GPT)` · `build_claude_graph` · `build_qwen_graph` · `build_claude_agent_graph`
 
@@ -391,4 +391,4 @@ SSE 이벤트 타입: `model_text` · `model_done` · `judge_text` · `judge_don
 - 한국어 멀티세션 대화
 - SNS 데이터 고도화
 
-자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md) · HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md) · 아키텍처 구조: [docs/architecture.md](docs/architecture.md)
+자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 코드 설명서: [basicdata/info.md](basicdata/info.md) · 아키텍처 구조: [basicdata/architecture.md](basicdata/architecture.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md) · HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md)
