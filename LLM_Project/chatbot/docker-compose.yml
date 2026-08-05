@@ -12,4 +12,9 @@ services:
       - ./source/data:/app/source/data
       # FAISS 캐시 영속화 (재빌드 방지)
       - ./source/.cache:/app/source/.cache
+      # HF Hub 모델 캐시 영속화 (첫 실행 시 다운로드, 이후 재사용)
+      - hf_cache:/root/.cache/huggingface
     restart: unless-stopped
+
+volumes:
+  hf_cache:

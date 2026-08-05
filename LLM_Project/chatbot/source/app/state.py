@@ -44,15 +44,14 @@ total_count = 12
 
 # ── 토크나이저 (gen·qa·span 공통) ──────────────────────────────────────────────
 print(f"[{now_count}/{total_count}] 토크나이저 로딩 중...")
-tokenizer = SopGptTokenizer.from_pretrained(HF_GEN_ID, local_files_only=True)
+tokenizer = SopGptTokenizer.from_pretrained(HF_GEN_ID)
 now_count += 1
 print(f"[{now_count}/{total_count}] 토크나이저 로딩 완료.")
 
-# float16으로 직접 로드 + local_files_only로 네트워크 체크 생략
+# float16으로 직접 로드 (캐시 없으면 HF Hub에서 자동 다운로드)
 _hf_kwargs = dict(
     trust_remote_code=True,
     torch_dtype=torch.float16,
-    local_files_only=True,
 )
 
 # ── HF Hub 모델 로드 ───────────────────────────────────────────────────────────

@@ -9,4 +9,8 @@ services:
       - ./source/model:/app/source/model
       - ./source/data:/app/source/data
       - ./source/.cache:/app/source/.cache
+      - hf_cache:/root/.cache/huggingface
     restart: unless-stopped
+
+volumes:
+  hf_cache:
