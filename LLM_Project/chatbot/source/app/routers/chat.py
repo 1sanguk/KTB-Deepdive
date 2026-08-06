@@ -54,6 +54,7 @@ def get_compare_history(thread_id: str = Query(...)):
 
 @router.post("/generate", response_model=GenerateResponse)
 def generate(req: GenerateRequest) -> GenerateResponse:
+    state.load_gen_model()
     try:
         text = state.gen_llm.invoke(req.prompt)
     except Exception:

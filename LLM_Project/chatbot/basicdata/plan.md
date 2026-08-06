@@ -110,9 +110,10 @@ source/
 ```
 - `sop_model/main.py`는 그 디렉터리에서 실행 (`train` / `chat` / `train_qa` / `train_span` / `train_dpo` 모드)
 - `app/app.py`는 FastAPI 서버 진입점. `uvicorn app:app`으로 실행 (source/app/ 디렉터리에서)
-- SOP GPT 모델은 HF Hub(`1sangukn/sop-gpt`)에서 `local_files_only=True`로 로드
+- SOP GPT 모델은 HF Hub(`1sangukn/sop-gpt`)에서 자동 다운로드 (캐시 없으면 HF Hub, 있으면 캐시 사용, `local_files_only` 제거됨)
 - 자동 라우팅: Claude Haiku가 `chit_chat / factual / general` 분류 → 체인 선택
 - Compare 모드: 4개 모델 병렬 실행 → Gemini Judge 최선 답변 선정
+- **EC2 배포 (t3.medium)**: vLLM 분기 비활성화(주석 처리), Q4_K_M 로컬 모델만 사용. BF16은 RAM 부족(3.7GB)으로 미탑재. llama-cpp-python은 EC2 Xeon 8259CL의 avx512vnni 미지원으로 소스 빌드(`-DGGML_AVX512_VNNI=OFF`) 필요.
 
 ## Phase 10 — Stage 5: DPO (Direct Preference Optimization) ✅
 - **목적**: Stage 2 SFT 모델이 "어떻게 대답할지"는 알지만 "좋은 답 vs 나쁜 답"을 구분하지 못하는 한계를 개선

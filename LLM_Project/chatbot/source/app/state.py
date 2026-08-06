@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 # import importlib.util  # vLLM 감지에 사용 (vLLM 활성화 시 주석 해제)
 import torch
 from pathlib import Path
@@ -40,7 +41,7 @@ GRAPH_SOP_THRESHOLD    = [0.35, 0.25, 0.2]
 GRAPH_CLAUDE_THRESHOLD = [0.515, 0.375, 0.350]
 
 now_count   = 0
-total_count = 12
+total_count = 11  # gen_model은 lazy load이므로 카운트에서 제외
 
 # ── 토크나이저 (gen·qa·span 공통) ──────────────────────────────────────────────
 print(f"[{now_count}/{total_count}] 토크나이저 로딩 중...")
@@ -54,12 +55,31 @@ _hf_kwargs = dict(
     torch_dtype=torch.float16,
 )
 
-# ── HF Hub 모델 로드 ───────────────────────────────────────────────────────────
-print(f"[{now_count}/{total_count}] 이어쓰기 모델(gen) 로딩 중...")
-gen_model = SopGptForCausalLM.from_pretrained(HF_GEN_ID, **_hf_kwargs).eval().to(device)
-now_count += 1
-print(f"[{now_count}/{total_count}] 이어쓰기 모델(gen) 로딩 완료.")
+# ── gen_model: /generate 전용 — lazy load (서버 시작 시 ~180MB RAM 절약) ─────────
+_gen_lock   = threading.Lock()
+_gen_loaded = False
+gen_model   = None
+gen_llm     = None
 
+def load_gen_model():
+    """최초 /generate 요청 시 1회 로드. 이후 호출은 즉시 반환."""
+    global _gen_loaded, gen_model, gen_llm
+    if _gen_loaded:
+        return
+    with _gen_lock:
+        if _gen_loaded:
+            return
+        print("[lazy] 이어쓰기 모델(gen) 로딩 중...")
+        gen_model = SopGptForCausalLM.from_pretrained(HF_GEN_ID, **_hf_kwargs).eval().to(device)
+        gen_llm = SOP_GPT_LLM(
+            hf_model=gen_model, tokenizer=tokenizer,
+            stop_on="sentence", temperature=0.7, top_k=None, top_p=0.9,
+            repetition_penalty=1.3, max_new_tokens=200,
+        )
+        _gen_loaded = True
+        print("[lazy] 이어쓰기 모델(gen) 로딩 완료.")
+
+# ── HF Hub 모델 로드 ───────────────────────────────────────────────────────────
 print(f"[{now_count}/{total_count}] QA 모델 로딩 중...")
 qa_model = SopGptForCausalLM.from_pretrained(HF_QA_ID, **_hf_kwargs).eval().to(device)
 now_count += 1
@@ -82,11 +102,6 @@ now_count += 1
 print(f"[{now_count}/{total_count}] 하이브리드 검색기(BM25+FAISS) 로딩 완료.")
 
 # ── LangChain LLM ──────────────────────────────────────────────────────────────
-gen_llm = SOP_GPT_LLM(
-    hf_model=gen_model, tokenizer=tokenizer,
-    stop_on="sentence", temperature=0.7, top_k=None, top_p=0.9,
-    repetition_penalty=1.3, max_new_tokens=200,
-)
 qa_llm = SOP_GPT_LLM(
     hf_model=qa_model, tokenizer=tokenizer,
     stop_on="sentence", temperature=0.7, top_k=40, top_p=0.9,

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 # HuggingFace 토크나이저 멀티프로세싱 비활성화 — 요청 처리 중 segfault 방지
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "2"  # t3.medium 2 vCPU — llama.cpp(Qwen Q4) 포함 OpenMP 스레드 수
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_ROOT / ".env")

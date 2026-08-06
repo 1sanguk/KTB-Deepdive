@@ -10,10 +10,10 @@ BF16_DIR   = MODEL_DIR / "Qwen3-1.7B"          # transformers 원본 (비양자�
 Q4_PATH    = MODEL_DIR / "Qwen3-1.7B-Q4_K_M.gguf"
 
 MAX_TOKENS       = 512
-MAX_TOKENS_THINK = 1024   # thinking 모드는 CoT 토큰도 포함되므로 여유 확보
-CONTEXT_SIZE     = 2048
+MAX_TOKENS_THINK = 768    # thinking 모드 CoT 예산 (t3.medium tail latency 감소)
+CONTEXT_SIZE     = 1024   # KV cache 메모리 절감 (실제 대화에서 2048 불필요)
 
-_THINK_THRESHOLD = 30  # 이 글자 수 이상이고 물음표 포함이면 thinking 활성화
+_THINK_THRESHOLD = 55  # 이 글자 수 이상이고 물음표 포함이면 thinking 활성화
 
 
 def _strip_think(text: str) -> str:
@@ -39,12 +39,13 @@ class QwenBase:
 # ── GGUF 버전 (llama-cpp, Q4) ─────────────────────────────────────────────────
 
 class QwenGGUF(QwenBase):
-    def __init__(self, gguf_path: Path, n_gpu_layers: int = -1, verbose: bool = False):
+    def __init__(self, gguf_path: Path, n_gpu_layers: int = 0, verbose: bool = False):
         from llama_cpp import Llama
         self.llm = Llama(
             model_path=str(gguf_path),
             n_gpu_layers=n_gpu_layers,
             n_ctx=CONTEXT_SIZE,
+            n_threads=2,  # t3.medium 2 vCPU 모두 활용
             verbose=verbose,
         )
 

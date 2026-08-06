@@ -11,8 +11,6 @@ services:
       - hf_cache:/root/.cache/huggingface
       # source/model 전체 마운트 (.dockerignore로 이미지에서 제외되므로 호스트에서 제공)
       - ./source/model:/app/source/model
-      # local_files_only 제거된 state.py (이미지 구버전 대응)
-      - ./source/app/state.py:/app/source/app/state.py
     restart: unless-stopped
 
 volumes:

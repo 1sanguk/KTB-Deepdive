@@ -44,9 +44,9 @@ flowchart TB
         sopQA["SOP_GPT QA<br/>직접 생성"]
         sopSpan["SOP_GPT Span<br/>정답 구간 추출"]
         claude["Claude Haiku API"]
-        vllmOllama["vLLM / Ollama<br/>OpenAI-compatible API 서버"]
-        qwenBF16["Qwen3-1.7B BF16<br/>Transformers (로컬 폴백)"]
-        qwenQ4["Qwen3-1.7B Q4_K_M<br/>llama.cpp (로컬 폴백)"]
+        vllmOllama["vLLM / Ollama<br/>OpenAI-compatible API 서버<br/>(현재 비활성 — t3.medium)"]
+        qwenBF16["Qwen3-1.7B BF16<br/>Transformers (RAM 부족으로 미탑재)"]
+        qwenQ4["Qwen3-1.7B Q4_K_M<br/>llama.cpp (EC2 소스 빌드)"]
     end
 
     subgraph data["데이터·영속화"]
@@ -155,8 +155,7 @@ sequenceDiagram
     participant Runner as Compare 실행기
     participant SOP as SOP_GPT Graph
     participant Claude as Claude Graph
-    participant Qwen as Qwen Graph (BF16·Q4)
-    participant vLLM as vLLM / Ollama API
+    participant Qwen as Qwen Graph (Q4_K_M ※BF16은 t3.medium RAM 부족으로 미탑재)
     participant Judge as Gemini Judge
     participant Store as JSON History
 
@@ -168,8 +167,6 @@ sequenceDiagram
         Runner->>Claude: 질문 + thread_id:c (병렬)
         Runner->>Qwen: 질문 + thread_id:bf16·q4 (Semaphore 순차)
     end
-    Qwen->>vLLM: HTTP POST /v1/chat/completions
-    vLLM-->>Qwen: 응답 + elapsed 시간
     SOP-->>Runner: 최종 답변 + elapsed
     Claude-->>Runner: 최종 답변 + elapsed
     Qwen-->>Runner: 최종 답변 + elapsed
