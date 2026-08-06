@@ -281,7 +281,7 @@ async def compare_stream(question: str, thread_id: str | None) -> AsyncGenerator
         acc = ""
 
         # Claude는 API 호출이라 semaphore 불필요, 나머지 로컬 Torch 모델만 순차 실행
-        sem = _torch_sem if key != "claude" else contextlib.nullcontext()
+        sem = _torch_sem if key not in ("claude", "qwen-q") else contextlib.nullcontext()
         async with sem:
             _start = loop.time()
             try:

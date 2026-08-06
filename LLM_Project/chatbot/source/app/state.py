@@ -19,6 +19,7 @@ from lc.chain import build_basic_chain, build_rag_chain
 from lc.retriever import build_hybrid_retriever
 from llm.claude_llm import build_claude_rag_chain
 from llm.qwen_llm import QwenTransformers, QwenGGUF, BF16_DIR, Q4_PATH
+from llm.qwen_worker import QwenGGUFProcess
 # from llm.vllm_llm import VLLMQwen  # vLLM 활성화 시 주석 해제
 from rag.rag import build_tfidf_retriever
 from lg.graph import build_graph, build_claude_graph, build_qwen_graph, build_claude_agent_graph
@@ -159,7 +160,7 @@ else:
 
 if Q4_PATH.exists():
     print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
-    qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
+    qwen_quant_llm = QwenGGUFProcess(Q4_PATH, verbose=False)
     now_count += 1
     print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
 else:
