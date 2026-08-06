@@ -1,8 +1,8 @@
 """서버 시작 시 한 번만 로드되는 모델·체인·검색기 전역 상태."""
 
-import importlib.util
 import os
 import sys
+# import importlib.util  # vLLM 감지에 사용 (vLLM 활성화 시 주석 해제)
 import torch
 from pathlib import Path
 
@@ -18,7 +18,7 @@ from lc.chain import build_basic_chain, build_rag_chain
 from lc.retriever import build_hybrid_retriever
 from llm.claude_llm import build_claude_rag_chain
 from llm.qwen_llm import QwenTransformers, QwenGGUF, BF16_DIR, Q4_PATH
-from llm.vllm_llm import VLLMQwen
+# from llm.vllm_llm import VLLMQwen  # vLLM 활성화 시 주석 해제
 from rag.rag import build_tfidf_retriever
 from lg.graph import build_graph, build_claude_graph, build_qwen_graph, build_claude_agent_graph
 from history import load_history, save_history, append_history
@@ -103,52 +103,53 @@ lc_rag_chain    = build_rag_chain(lc_retriever,    qa_llm, span_extractor_fn, RA
 claude_tfidf_chain = build_claude_rag_chain(tfidf_retriever, TFIDF_SIM_THRESHOLD)
 claude_lc_chain    = build_claude_rag_chain(lc_retriever,    RAG_SIM_THRESHOLD)
 
-_VLLM_URL_ENV   = os.environ.get("VLLM_BASE_URL", "")
-_VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
+# ── vLLM / Ollama 외부 서버 모드 (GPU 인스턴스 등에서 사용) ──────────────────────
+# _VLLM_URL_ENV   = os.environ.get("VLLM_BASE_URL", "")
+# _VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
+#
+# # VLLM_BASE_URL 명시 → Ollama/vLLM 모두 커버
+# # vllm 패키지 설치됨 → 기본 vLLM 포트(8001) 시도
+# # 둘 다 없으면 → 로컬 모델
+# if _VLLM_URL_ENV:
+#     _VLLM_URL = _VLLM_URL_ENV
+# elif _VLLM_INSTALLED:
+#     _VLLM_URL = "http://localhost:8001/v1"
+# else:
+#     _VLLM_URL = ""
+#
+# if _VLLM_URL:
+#     # ── 외부 서버 모드 (vLLM 또는 Ollama) ────────────────────────────────────
+#     print(f"[{now_count}/{total_count}] 외부 LLM 서버 연결 중... ({_VLLM_URL})")
+#     _vllm = VLLMQwen()
+#     if _vllm.health_check():
+#         qwen_llm       = _vllm
+#         qwen_quant_llm = _vllm   # 단일 서버를 두 슬롯 모두에 매핑
+#         now_count += 1
+#         print(f"[{now_count}/{total_count}] 외부 LLM 서버 연결 완료 — qwen·qwen-q 슬롯 사용.")
+#     else:
+#         print(f"[경고] 서버({_VLLM_URL})에 연결할 수 없음 — 로컬 모델로 폴백")
+#         qwen_llm       = None
+#         qwen_quant_llm = None
+# else:
 
-# VLLM_BASE_URL 명시 → Ollama/vLLM 모두 커버
-# vllm 패키지 설치됨 → 기본 vLLM 포트(8001) 시도
-# 둘 다 없으면 → 로컬 모델
-if _VLLM_URL_ENV:
-    _VLLM_URL = _VLLM_URL_ENV
-elif _VLLM_INSTALLED:
-    _VLLM_URL = "http://localhost:8001/v1"
+# ── 로컬 모델 로딩 (t3.medium 등 vLLM 미사용 환경) ─────────────────────────────
+if BF16_DIR.exists():
+    print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 중...")
+    qwen_llm = QwenTransformers(BF16_DIR)
+    now_count += 1
+    print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 완료.")
 else:
-    _VLLM_URL = ""
+    print(f"[skip] Qwen BF16 모델 없음 — qwen 엔드포인트 비활성화")
+    qwen_llm = None
 
-if _VLLM_URL:
-    # ── 외부 서버 모드 (vLLM 또는 Ollama) ────────────────────────────────────
-    print(f"[{now_count}/{total_count}] 외부 LLM 서버 연결 중... ({_VLLM_URL})")
-    _vllm = VLLMQwen()
-    if _vllm.health_check():
-        qwen_llm       = _vllm
-        qwen_quant_llm = _vllm   # 단일 서버를 두 슬롯 모두에 매핑
-        now_count += 1
-        print(f"[{now_count}/{total_count}] 외부 LLM 서버 연결 완료 — qwen·qwen-q 슬롯 사용.")
-    else:
-        print(f"[경고] 서버({_VLLM_URL})에 연결할 수 없음 — 로컬 모델로 폴백")
-        qwen_llm       = None
-        qwen_quant_llm = None
+if Q4_PATH.exists():
+    print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
+    qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
+    now_count += 1
+    print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
 else:
-    # ── 로컬 모델 (기존 동작) ──────────────────────────────────────────────────
-    print(f"[info] 외부 LLM 서버 없음 — 로컬 모델 로딩")
-    if BF16_DIR.exists():
-        print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 중...")
-        qwen_llm = QwenTransformers(BF16_DIR)
-        now_count += 1
-        print(f"[{now_count}/{total_count}] Qwen BF16 (비양자화) 로딩 완료.")
-    else:
-        print(f"[skip] Qwen BF16 모델 없음 — qwen 엔드포인트 비활성화")
-        qwen_llm = None
-
-    if Q4_PATH.exists():
-        print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 중...")
-        qwen_quant_llm = QwenGGUF(Q4_PATH, verbose=False)
-        now_count += 1
-        print(f"[{now_count}/{total_count}] Qwen Q4_K_M (양자화) 로딩 완료.")
-    else:
-        print(f"[skip] Qwen Q4 모델 없음 — qwen-q 엔드포인트 비활성화")
-        qwen_quant_llm = None
+    print(f"[skip] Qwen Q4 모델 없음 — qwen-q 엔드포인트 비활성화")
+    qwen_quant_llm = None
 
 print(f"[{now_count}/{total_count}] LangGraph 파이프라인 빌드 중...")
 lg_graph = build_graph(lc_retriever, qa_llm, span_extractor_fn, GRAPH_SOP_THRESHOLD,
