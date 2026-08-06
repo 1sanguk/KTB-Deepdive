@@ -11,7 +11,7 @@ Q4_PATH    = MODEL_DIR / "Qwen3-1.7B-Q4_K_M.gguf"
 
 MAX_TOKENS       = 512
 MAX_TOKENS_THINK = 768    # thinking 모드 CoT 예산 (t3.medium tail latency 감소)
-CONTEXT_SIZE     = 1024   # KV cache 메모리 절감 (실제 대화에서 2048 불필요)
+CONTEXT_SIZE     = 2048   # 프롬프트(히스토리+RAG+질문) + 생성 토큰 합을 여유 있게 수용
 
 _THINK_THRESHOLD = 55  # 이 글자 수 이상이고 물음표 포함이면 thinking 활성화
 
