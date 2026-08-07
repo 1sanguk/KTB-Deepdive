@@ -38,10 +38,10 @@ Mermaid로 작성한 최신 구조도와 세부 실행 흐름은
 
 | Stage | 역할 | 결과물 | 단계를 나눈 이유 |
 |---|---|---|---|
-| Stage 1 | 이어쓰기 (kowikitext + 챗봇 Q&A + AI Hub 대화) | `SOP_GPT.pt` | 베이스 언어 능력 확보. 다음 토큰 예측으로 어휘·문법·문맥을 먼저 학습 |
-| Stage 2 | Q&A 파인튜닝 (`"질문: …\n답변: …"` 포맷) | `SOP_GPT_qa.pt` | 언어 능력 위에 질문→답변 형식을 추가 학습. Stage 1 없이 하면 형식만 흉내 냄 |
-| Stage 4 | 추출형 RAG QA — `SOP_GPT_Span`이 정답의 시작/끝 토큰 위치 분류 | `SOP_GPT_span.pt` | RAG 컨텍스트가 주어졌을 때 생성보다 추출이 더 정확. 소규모 모델로 긴 문장을 생성하면 품질이 떨어지므로 분류 태스크로 전환 |
-| Stage 5 | DPO 선호 정렬 | `SOP_GPT_dpo.pt` | 지도학습만으로는 "더 나은 답변"을 구별 못 함. chosen/rejected 쌍으로 선호 방향을 정렬. **실험 결과**: KorQuAD GT(명사구) vs 모델 오답(단어)은 스타일 불일치로 성능 저하. 챗봇 데이터(대화체 일치)로 val loss 0.0250까지 개선됐으나 실제 파이프라인 수치 변화 없음. 이유는 두 가지 — ① 추론 경로의 핵심이 Span 모델이라 QA 모델 DPO가 파이프라인에 영향을 주지 못함, ② 91M 소규모 모델에서 DPO는 이미 정답을 생성할 수 있는 능력이 전제되어야 함. 현 단계 `SOP_GPT_qa.pt` 유지. |
+| 1 | 이어쓰기 (kowikitext + 챗봇 Q&A + AI Hub 대화) | `SOP_GPT.pt` | 베이스 언어 능력 확보. 다음 토큰 예측으로 어휘·문법·문맥을 먼저 학습 |
+| 2 | Q&A 파인튜닝 (`"질문: …\n답변: …"` 포맷) | `SOP_GPT_qa.pt` | 언어 능력 위에 질문→답변 형식을 추가 학습. Stage 1 없이 하면 형식만 흉내 냄 |
+| 4 | 추출형 RAG QA — `SOP_GPT_Span`이 정답의 시작/끝 토큰 위치 분류 | `SOP_GPT_span.pt` | RAG 컨텍스트가 주어졌을 때 생성보다 추출이 더 정확. 소규모 모델로 긴 문장을 생성하면 품질이 떨어지므로 분류 태스크로 전환 |
+| 5 | DPO 선호 정렬 | `SOP_GPT_dpo.pt` | 지도학습만으로는 "더 나은 답변"을 구별 못 함. chosen/rejected 쌍으로 선호 방향을 정렬. **실험 결과**: KorQuAD GT(명사구) vs 모델 오답(단어)은 스타일 불일치로 성능 저하. 챗봇 데이터(대화체 일치)로 val loss 0.0250까지 개선됐으나 실제 파이프라인 수치 변화 없음. 이유는 두 가지 — ① 추론 경로의 핵심이 Span 모델이라 QA 모델 DPO가 파이프라인에 영향을 주지 못함, ② 91M 소규모 모델에서 DPO는 이미 정답을 생성할 수 있는 능력이 전제되어야 함. 현 단계 `SOP_GPT_qa.pt` 유지. |
 
 **최적화**: bf16 혼합 정밀도(`torch.autocast`) · gradient accumulation · KV Cache 증분 디코딩
 
@@ -391,4 +391,12 @@ SSE 이벤트 타입: `model_text` · `model_done` · `judge_text` · `judge_don
 - 한국어 멀티세션 대화
 - SNS 데이터 고도화
 
-자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md) · 변경 이력: [version.md](version.md) · 평가 결과: [basicdata/eval.md](basicdata/eval.md) · 코드 설명서: [basicdata/info.md](basicdata/info.md) · 아키텍처 구조: [basicdata/architecture.md](basicdata/architecture.md) · 회고: [docs/review.md](docs/review.md) · 인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md) · HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md)
+## 추가 자료
+자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md)
+변경 이력: [version.md](version.md)
+평가 결과: [basicdata/eval.md](basicdata/eval.md)
+코드 설명서: [basicdata/info.md](basicdata/info.md)
+아키텍처 구조: [basicdata/architecture.md](basicdata/architecture.md)
+회고: [docs/review.md](docs/review.md)
+인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md)
+HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md)
