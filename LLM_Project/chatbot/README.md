@@ -393,10 +393,17 @@ SSE 이벤트 타입: `model_text` · `model_done` · `judge_text` · `judge_don
 
 ## 추가 자료
 자세한 개발 과정: [basicdata/plan.md](basicdata/plan.md)
+
 변경 이력: [version.md](version.md)
+
 평가 결과: [basicdata/eval.md](basicdata/eval.md)
+
 코드 설명서: [basicdata/info.md](basicdata/info.md)
+
 아키텍처 구조: [basicdata/architecture.md](basicdata/architecture.md)
+
 회고: [docs/review.md](docs/review.md)
+
 인스턴스 관련 보고 자료: [docs/instance_info.md](docs/instance_info.md)
+
 HTTP/HTTPS 통신 분석: [docs/wireshark_report.md](docs/wireshark_report.md)
